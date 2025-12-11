@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from dataclasses import asdict
 from functools import wraps
 
-from sentinel_sdk.types import (
+from .types import (
     EvaluateResult,
     PolicyConfig,
     RegisterResult,

@@ -44,7 +44,7 @@ Error Handling:
     except SentinelConnectionError:
         print("Cannot reach Sentinel service")
 """
-from sentinel_sdk.client import (
+from .client import (
     SentinelClient,
     SentinelError,
     SentinelConnectionError,
@@ -53,7 +53,7 @@ from sentinel_sdk.client import (
     RetryConfig,
     CircuitBreaker,
 )
-from sentinel_sdk.types import (
+from .types import (
     EvaluateResult,
     PolicyConfig,
     RegisterResult,
