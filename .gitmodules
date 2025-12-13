@@ -1,0 +1,2 @@
+[submodule "backend/sentinel/sdk"]
+	url = git@github.com:calliopeai/zentinelle-sdk.git

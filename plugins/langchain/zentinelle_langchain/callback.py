@@ -1,0 +1,424 @@
+"""
+LangChain callback handler for Zentinelle observability.
+"""
+import logging
+from typing import Any, Dict, List, Optional, Union
+from uuid import UUID
+
+from langchain_core.callbacks import BaseCallbackHandler
+from langchain_core.outputs import LLMResult
+from langchain_core.agents import AgentAction, AgentFinish
+from langchain_core.messages import BaseMessage
+
+from zentinelle import ZentinelleClient, ModelUsage
+
+logger = logging.getLogger(__name__)
+
+
+class ZentinelleCallbackHandler(BaseCallbackHandler):
+    """
+    LangChain callback handler that sends telemetry to Zentinelle.
+
+    Tracks:
+    - LLM calls (model, tokens, duration)
+    - Tool invocations
+    - Chain execution
+    - Agent actions
+
+    Usage:
+        from langchain_openai import ChatOpenAI
+        from zentinelle_langchain import ZentinelleCallbackHandler
+
+        handler = ZentinelleCallbackHandler(
+            api_key="sk_agent_...",
+            agent_type="langchain",
+        )
+
+        llm = ChatOpenAI(callbacks=[handler])
+        result = llm.invoke("Hello!")
+    """
+
+    def __init__(
+        self,
+        api_key: str,
+        agent_type: str = "langchain",
+        endpoint: Optional[str] = None,
+        user_id: Optional[str] = None,
+        track_prompts: bool = False,
+        track_completions: bool = False,
+        **client_kwargs,
+    ):
+        """
+        Initialize callback handler.
+
+        Args:
+            api_key: Zentinelle API key
+            agent_type: Agent type identifier
+            endpoint: Custom Zentinelle endpoint
+            user_id: Default user ID for events
+            track_prompts: Include prompts in events (may contain PII)
+            track_completions: Include completions in events
+            **client_kwargs: Additional args for ZentinelleClient
+        """
+        super().__init__()
+        self.client = ZentinelleClient(
+            api_key=api_key,
+            agent_type=agent_type,
+            endpoint=endpoint,
+            **client_kwargs,
+        )
+        self.user_id = user_id
+        self.track_prompts = track_prompts
+        self.track_completions = track_completions
+
+        # Track timing
+        self._start_times: Dict[UUID, float] = {}
+
+    def register(
+        self,
+        capabilities: Optional[List[str]] = None,
+        metadata: Optional[Dict] = None,
+    ):
+        """Register the agent with Zentinelle."""
+        return self.client.register(
+            capabilities=capabilities or ["chat", "tools"],
+            metadata=metadata,
+        )
+
+    # =========================================================================
+    # LLM Callbacks
+    # =========================================================================
+
+    def on_llm_start(
+        self,
+        serialized: Dict[str, Any],
+        prompts: List[str],
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Called when LLM starts running."""
+        import time
+        self._start_times[run_id] = time.time()
+
+        payload = {
+            'model': serialized.get('kwargs', {}).get('model_name', 'unknown'),
+            'provider': serialized.get('id', ['unknown'])[-1],
+        }
+
+        if self.track_prompts:
+            payload['prompts'] = prompts
+
+        self.client.emit(
+            'llm_start',
+            payload,
+            category='telemetry',
+            user_id=self.user_id,
+        )
+
+    def on_llm_end(
+        self,
+        response: LLMResult,
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Called when LLM ends running."""
+        import time
+        duration_ms = None
+        if run_id in self._start_times:
+            duration_ms = int((time.time() - self._start_times.pop(run_id)) * 1000)
+
+        # Extract token usage if available
+        token_usage = response.llm_output.get('token_usage', {}) if response.llm_output else {}
+        model = response.llm_output.get('model_name', 'unknown') if response.llm_output else 'unknown'
+
+        input_tokens = token_usage.get('prompt_tokens', 0)
+        output_tokens = token_usage.get('completion_tokens', 0)
+
+        # Track usage for cost policies
+        if input_tokens or output_tokens:
+            self.client.track_usage(ModelUsage(
+                provider='openai',  # TODO: detect from response
+                model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+            ))
+
+        payload = {
+            'model': model,
+            'input_tokens': input_tokens,
+            'output_tokens': output_tokens,
+            'duration_ms': duration_ms,
+        }
+
+        if self.track_completions and response.generations:
+            payload['completions'] = [
+                gen.text for gen in response.generations[0]
+            ]
+
+        self.client.emit(
+            'llm_end',
+            payload,
+            category='telemetry',
+            user_id=self.user_id,
+        )
+
+    def on_llm_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Called when LLM errors."""
+        self._start_times.pop(run_id, None)
+
+        self.client.emit(
+            'llm_error',
+            {
+                'error_type': type(error).__name__,
+                'error_message': str(error)[:500],
+            },
+            category='alert',
+            user_id=self.user_id,
+        )
+
+    # =========================================================================
+    # Chat Model Callbacks
+    # =========================================================================
+
+    def on_chat_model_start(
+        self,
+        serialized: Dict[str, Any],
+        messages: List[List[BaseMessage]],
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Called when chat model starts."""
+        import time
+        self._start_times[run_id] = time.time()
+
+        payload = {
+            'model': serialized.get('kwargs', {}).get('model_name', 'unknown'),
+            'provider': serialized.get('id', ['unknown'])[-1],
+            'message_count': sum(len(m) for m in messages),
+        }
+
+        self.client.emit(
+            'chat_model_start',
+            payload,
+            category='telemetry',
+            user_id=self.user_id,
+        )
+
+    # =========================================================================
+    # Tool Callbacks
+    # =========================================================================
+
+    def on_tool_start(
+        self,
+        serialized: Dict[str, Any],
+        input_str: str,
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        inputs: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Called when tool starts running."""
+        import time
+        self._start_times[run_id] = time.time()
+
+        tool_name = serialized.get('name', 'unknown')
+
+        self.client.emit(
+            'tool_start',
+            {
+                'tool': tool_name,
+                'input_length': len(input_str),
+            },
+            category='audit',
+            user_id=self.user_id,
+        )
+
+    def on_tool_end(
+        self,
+        output: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Called when tool ends running."""
+        import time
+        duration_ms = None
+        if run_id in self._start_times:
+            duration_ms = int((time.time() - self._start_times.pop(run_id)) * 1000)
+
+        self.client.emit(
+            'tool_end',
+            {
+                'output_length': len(str(output)),
+                'duration_ms': duration_ms,
+            },
+            category='audit',
+            user_id=self.user_id,
+        )
+
+    def on_tool_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Called when tool errors."""
+        self._start_times.pop(run_id, None)
+
+        self.client.emit(
+            'tool_error',
+            {
+                'error_type': type(error).__name__,
+                'error_message': str(error)[:500],
+            },
+            category='alert',
+            user_id=self.user_id,
+        )
+
+    # =========================================================================
+    # Chain Callbacks
+    # =========================================================================
+
+    def on_chain_start(
+        self,
+        serialized: Dict[str, Any],
+        inputs: Dict[str, Any],
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        tags: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Called when chain starts running."""
+        import time
+        self._start_times[run_id] = time.time()
+
+        chain_name = serialized.get('name', serialized.get('id', ['unknown'])[-1])
+
+        self.client.emit(
+            'chain_start',
+            {
+                'chain': chain_name,
+                'is_root': parent_run_id is None,
+            },
+            category='telemetry',
+            user_id=self.user_id,
+        )
+
+    def on_chain_end(
+        self,
+        outputs: Dict[str, Any],
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Called when chain ends running."""
+        import time
+        duration_ms = None
+        if run_id in self._start_times:
+            duration_ms = int((time.time() - self._start_times.pop(run_id)) * 1000)
+
+        self.client.emit(
+            'chain_end',
+            {
+                'duration_ms': duration_ms,
+                'is_root': parent_run_id is None,
+            },
+            category='telemetry',
+            user_id=self.user_id,
+        )
+
+    def on_chain_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Called when chain errors."""
+        self._start_times.pop(run_id, None)
+
+        self.client.emit(
+            'chain_error',
+            {
+                'error_type': type(error).__name__,
+                'error_message': str(error)[:500],
+            },
+            category='alert',
+            user_id=self.user_id,
+        )
+
+    # =========================================================================
+    # Agent Callbacks
+    # =========================================================================
+
+    def on_agent_action(
+        self,
+        action: AgentAction,
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Called when agent takes an action."""
+        self.client.emit(
+            'agent_action',
+            {
+                'tool': action.tool,
+                'log': action.log[:500] if action.log else None,
+            },
+            category='audit',
+            user_id=self.user_id,
+        )
+
+    def on_agent_finish(
+        self,
+        finish: AgentFinish,
+        *,
+        run_id: UUID,
+        parent_run_id: Optional[UUID] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Called when agent finishes."""
+        self.client.emit(
+            'agent_finish',
+            {
+                'has_output': bool(finish.return_values),
+            },
+            category='audit',
+            user_id=self.user_id,
+        )
+
+    # =========================================================================
+    # Lifecycle
+    # =========================================================================
+
+    def shutdown(self):
+        """Shutdown the client and flush events."""
+        self.client.shutdown()

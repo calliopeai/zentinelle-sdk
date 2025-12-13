@@ -1,5 +1,5 @@
 """
-Sentinel SDK Client - Main client class for agent integration.
+Zentinelle SDK Client - Main client class for AI agent governance.
 """
 import threading
 import time
@@ -8,7 +8,6 @@ import random
 import requests
 from typing import List, Dict, Any, Optional, Callable
 from datetime import datetime, timedelta
-from dataclasses import asdict
 from functools import wraps
 
 from .types import (
@@ -18,27 +17,30 @@ from .types import (
     ConfigResult,
     SecretsResult,
     EventsResult,
+    HeartbeatResult,
+    ModelUsage,
+    EventCategory,
 )
 
 logger = logging.getLogger(__name__)
 
 
-class SentinelError(Exception):
-    """Base exception for Sentinel SDK errors."""
+class ZentinelleError(Exception):
+    """Base exception for Zentinelle SDK errors."""
     pass
 
 
-class SentinelConnectionError(SentinelError):
-    """Raised when unable to connect to Sentinel."""
+class ZentinelleConnectionError(ZentinelleError):
+    """Raised when unable to connect to Zentinelle."""
     pass
 
 
-class SentinelAuthError(SentinelError):
+class ZentinelleAuthError(ZentinelleError):
     """Raised when authentication fails."""
     pass
 
 
-class SentinelRateLimitError(SentinelError):
+class ZentinelleRateLimitError(ZentinelleError):
     """Raised when rate limit is exceeded."""
     def __init__(self, message: str, retry_after: int = 60):
         super().__init__(message)
@@ -67,57 +69,10 @@ class RetryConfig:
         delay = min(delay, self.max_delay)
 
         if self.jitter:
-            # Add random jitter (±25%)
             jitter_range = delay * 0.25
             delay += random.uniform(-jitter_range, jitter_range)
 
         return max(0, delay)
-
-
-def with_retry(
-    retry_config: Optional[RetryConfig] = None,
-    retryable_exceptions: tuple = (requests.RequestException, SentinelConnectionError),
-    on_retry: Optional[Callable[[Exception, int], None]] = None,
-):
-    """
-    Decorator for retrying functions with exponential backoff.
-
-    Args:
-        retry_config: Retry configuration
-        retryable_exceptions: Tuple of exceptions to retry on
-        on_retry: Callback called before each retry (exception, attempt)
-    """
-    config = retry_config or RetryConfig()
-
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            last_exception = None
-
-            for attempt in range(config.max_retries + 1):
-                try:
-                    return func(*args, **kwargs)
-                except retryable_exceptions as e:
-                    last_exception = e
-
-                    if attempt >= config.max_retries:
-                        raise
-
-                    delay = config.get_delay(attempt)
-
-                    if on_retry:
-                        on_retry(e, attempt)
-
-                    logger.warning(
-                        f"Request failed (attempt {attempt + 1}/{config.max_retries + 1}), "
-                        f"retrying in {delay:.1f}s: {e}"
-                    )
-                    time.sleep(delay)
-
-            raise last_exception
-
-        return wrapper
-    return decorator
 
 
 class CircuitBreaker:
@@ -154,7 +109,6 @@ class CircuitBreaker:
     def state(self) -> str:
         with self._lock:
             if self._state == self.OPEN:
-                # Check if recovery timeout has passed
                 if time.time() - (self._last_failure_time or 0) > self.recovery_timeout:
                     self._state = self.HALF_OPEN
                     self._half_open_calls = 0
@@ -166,7 +120,6 @@ class CircuitBreaker:
             if self._state == self.HALF_OPEN:
                 self._half_open_calls += 1
                 if self._half_open_calls >= self.half_open_max_calls:
-                    # Recovered
                     self._state = self.CLOSED
                     self._failure_count = 0
                     logger.info("Circuit breaker recovered to CLOSED state")
@@ -180,7 +133,6 @@ class CircuitBreaker:
             self._last_failure_time = time.time()
 
             if self._state == self.HALF_OPEN:
-                # Failed during recovery test
                 self._state = self.OPEN
                 logger.warning("Circuit breaker back to OPEN state")
             elif self._failure_count >= self.failure_threshold:
@@ -198,41 +150,42 @@ class CircuitBreaker:
         @wraps(func)
         def wrapper(*args, **kwargs):
             if not self.can_execute():
-                raise SentinelConnectionError(
-                    "Circuit breaker is OPEN - Sentinel service appears to be down"
+                raise ZentinelleConnectionError(
+                    "Circuit breaker is OPEN - Zentinelle service appears to be down"
                 )
 
             try:
                 result = func(*args, **kwargs)
                 self.record_success()
                 return result
-            except Exception as e:
+            except Exception:
                 self.record_failure()
                 raise
 
         return wrapper
 
 
-class SentinelClient:
+class ZentinelleClient:
     """
-    Sentinel SDK client for agent integration.
+    Zentinelle SDK client for AI agent governance.
 
     Features:
     - Automatic heartbeats in background
     - Buffered event emission (batch sends)
     - Config/secrets caching
-    - Graceful degradation when Sentinel unavailable
+    - Graceful degradation when Zentinelle unavailable
+    - Framework-agnostic (works with any AI framework)
 
     Usage:
-        client = SentinelClient(
-            endpoint="https://sentinel.example.com",
+        client = ZentinelleClient(
+            endpoint="https://api.zentinelle.ai",
             api_key="sk_agent_...",
-            agent_type="jupyterhub",
+            agent_type="langchain",
         )
 
         # On startup
         config = client.register(
-            capabilities=["lab", "chat"],
+            capabilities=["chat", "tools"],
             metadata={"version": "1.0.0"}
         )
 
@@ -241,19 +194,24 @@ class SentinelClient:
         openai_key = secrets["OPENAI_API_KEY"]
 
         # Before critical actions
-        result = client.evaluate("spawn", user_id="user123", context={...})
+        result = client.evaluate("tool_call", user_id="user123", context={...})
         if not result.allowed:
             raise PermissionError(result.reason)
 
+        # Track model usage
+        client.track_usage(ModelUsage.from_openai(response))
+
         # Emit events (buffered, async)
-        client.emit("spawn", {"user_id": "user123", "service": "lab"})
+        client.emit("tool_call", {"tool": "web_search"})
     """
+
+    DEFAULT_ENDPOINT = "https://api.zentinelle.ai"
 
     def __init__(
         self,
-        endpoint: str,
         api_key: str,
         agent_type: str,
+        endpoint: Optional[str] = None,
         agent_id: Optional[str] = None,
         org_id: Optional[str] = None,
         auto_heartbeat: bool = True,
@@ -266,16 +224,17 @@ class SentinelClient:
         retry_config: Optional[RetryConfig] = None,
         circuit_breaker_threshold: int = 5,
         circuit_breaker_recovery: float = 30.0,
+        fail_open: bool = False,
     ):
         """
-        Initialize Sentinel client.
+        Initialize Zentinelle client.
 
         Args:
-            endpoint: Sentinel API endpoint URL
             api_key: API key for authentication
-            agent_type: Type of agent (jupyterhub, chat, langchain, etc.)
+            agent_type: Type of agent (langchain, autogen, crewai, custom, etc.)
+            endpoint: Zentinelle API endpoint URL (defaults to cloud)
             agent_id: Optional agent ID (generated on registration if not provided)
-            org_id: Organization ID (required for registration)
+            org_id: Organization ID (optional, derived from API key if not provided)
             auto_heartbeat: Enable automatic heartbeat sending
             heartbeat_interval: Seconds between heartbeats
             event_buffer_size: Max events to buffer before flush
@@ -283,16 +242,18 @@ class SentinelClient:
             config_cache_ttl: Config cache TTL in seconds
             secrets_cache_ttl: Secrets cache TTL in seconds
             timeout: HTTP request timeout in seconds
-            retry_config: Custom retry configuration (uses defaults if not provided)
+            retry_config: Custom retry configuration
             circuit_breaker_threshold: Number of failures before opening circuit
             circuit_breaker_recovery: Seconds to wait before testing recovery
+            fail_open: If True, allow actions when Zentinelle is unreachable
         """
-        self.endpoint = endpoint.rstrip('/')
+        self.endpoint = (endpoint or self.DEFAULT_ENDPOINT).rstrip('/')
         self.api_key = api_key
         self.agent_type = agent_type
         self.agent_id = agent_id
         self.org_id = org_id
         self.timeout = timeout
+        self.fail_open = fail_open
 
         # Retry and circuit breaker config
         self._retry_config = retry_config or RetryConfig()
@@ -326,16 +287,17 @@ class SentinelClient:
         self._flush_thread = threading.Thread(
             target=self._flush_loop,
             daemon=True,
-            name="sentinel-flush"
+            name="zentinelle-flush"
         )
         self._flush_thread.start()
 
         # Start heartbeat thread if enabled
+        self._heartbeat_thread = None
         if auto_heartbeat:
             self._heartbeat_thread = threading.Thread(
                 target=self._heartbeat_loop,
                 daemon=True,
-                name="sentinel-heartbeat"
+                name="zentinelle-heartbeat"
             )
             self._heartbeat_thread.start()
 
@@ -347,30 +309,31 @@ class SentinelClient:
         """Get request headers."""
         headers = {
             'Content-Type': 'application/json',
+            'User-Agent': 'zentinelle-python/0.1.0',
         }
         if self.api_key:
-            headers['X-Sentinel-Key'] = self.api_key
+            headers['X-Zentinelle-Key'] = self.api_key
         if self.org_id:
-            headers['X-Sentinel-Org'] = self.org_id
+            headers['X-Zentinelle-Org'] = self.org_id
         return headers
 
     def _handle_response(self, response: requests.Response) -> Dict:
         """Handle HTTP response, converting errors to appropriate exceptions."""
         if response.status_code == 401:
-            raise SentinelAuthError("Invalid or expired API key")
+            raise ZentinelleAuthError("Invalid or expired API key")
 
         if response.status_code == 403:
-            raise SentinelAuthError("Access denied - insufficient permissions")
+            raise ZentinelleAuthError("Access denied - insufficient permissions")
 
         if response.status_code == 429:
             retry_after = int(response.headers.get('Retry-After', 60))
-            raise SentinelRateLimitError(
+            raise ZentinelleRateLimitError(
                 "Rate limit exceeded",
                 retry_after=retry_after
             )
 
         if response.status_code >= 500:
-            raise SentinelConnectionError(
+            raise ZentinelleConnectionError(
                 f"Server error: {response.status_code} - {response.text[:200]}"
             )
 
@@ -380,11 +343,14 @@ class SentinelClient:
     def _get(self, path: str) -> Dict:
         """Make GET request with retry logic."""
         if not self._circuit_breaker.can_execute():
-            raise SentinelConnectionError(
-                "Circuit breaker is OPEN - Sentinel service appears to be down"
+            if self.fail_open:
+                logger.warning("Circuit breaker OPEN, failing open")
+                return {}
+            raise ZentinelleConnectionError(
+                "Circuit breaker is OPEN - Zentinelle service appears to be down"
             )
 
-        url = f"{self.endpoint}/api/sentinel/v1{path}"
+        url = f"{self.endpoint}/api/v1{path}"
         last_exception = None
 
         for attempt in range(self._retry_config.max_retries + 1):
@@ -398,21 +364,22 @@ class SentinelClient:
                 self._circuit_breaker.record_success()
                 return result
 
-            except SentinelRateLimitError as e:
-                # Don't retry rate limits, respect retry-after
-                self._circuit_breaker.record_success()  # Rate limit isn't a failure
+            except ZentinelleRateLimitError:
+                self._circuit_breaker.record_success()
                 raise
 
-            except SentinelAuthError:
-                # Don't retry auth errors
+            except ZentinelleAuthError:
                 raise
 
-            except (requests.RequestException, SentinelConnectionError) as e:
+            except (requests.RequestException, ZentinelleConnectionError) as e:
                 last_exception = e
                 self._circuit_breaker.record_failure()
 
                 if attempt >= self._retry_config.max_retries:
-                    raise SentinelConnectionError(f"Failed after {attempt + 1} attempts: {e}")
+                    if self.fail_open:
+                        logger.warning(f"Failed after {attempt + 1} attempts, failing open")
+                        return {}
+                    raise ZentinelleConnectionError(f"Failed after {attempt + 1} attempts: {e}")
 
                 delay = self._retry_config.get_delay(attempt)
                 logger.warning(
@@ -426,11 +393,14 @@ class SentinelClient:
     def _post(self, path: str, data: Dict) -> Dict:
         """Make POST request with retry logic."""
         if not self._circuit_breaker.can_execute():
-            raise SentinelConnectionError(
-                "Circuit breaker is OPEN - Sentinel service appears to be down"
+            if self.fail_open:
+                logger.warning("Circuit breaker OPEN, failing open")
+                return {'allowed': True, 'reason': 'fail_open'}
+            raise ZentinelleConnectionError(
+                "Circuit breaker is OPEN - Zentinelle service appears to be down"
             )
 
-        url = f"{self.endpoint}/api/sentinel/v1{path}"
+        url = f"{self.endpoint}/api/v1{path}"
         last_exception = None
 
         for attempt in range(self._retry_config.max_retries + 1):
@@ -445,21 +415,22 @@ class SentinelClient:
                 self._circuit_breaker.record_success()
                 return result
 
-            except SentinelRateLimitError as e:
-                # Don't retry rate limits
+            except ZentinelleRateLimitError:
                 self._circuit_breaker.record_success()
                 raise
 
-            except SentinelAuthError:
-                # Don't retry auth errors
+            except ZentinelleAuthError:
                 raise
 
-            except (requests.RequestException, SentinelConnectionError) as e:
+            except (requests.RequestException, ZentinelleConnectionError) as e:
                 last_exception = e
                 self._circuit_breaker.record_failure()
 
                 if attempt >= self._retry_config.max_retries:
-                    raise SentinelConnectionError(f"Failed after {attempt + 1} attempts: {e}")
+                    if self.fail_open:
+                        logger.warning(f"Failed after {attempt + 1} attempts, failing open")
+                        return {'allowed': True, 'reason': 'fail_open'}
+                    raise ZentinelleConnectionError(f"Failed after {attempt + 1} attempts: {e}")
 
                 delay = self._retry_config.get_delay(attempt)
                 logger.warning(
@@ -476,26 +447,25 @@ class SentinelClient:
 
     def register(
         self,
-        capabilities: List[str],
+        capabilities: Optional[List[str]] = None,
         metadata: Optional[Dict] = None,
         name: Optional[str] = None,
     ) -> RegisterResult:
         """
         Register agent on startup.
-        Returns initial config, policies, and API key (only time key is visible).
 
         Args:
-            capabilities: List of agent capabilities (e.g., ["lab", "chat"])
+            capabilities: List of agent capabilities (e.g., ["chat", "tools", "code"])
             metadata: Optional metadata (version, cluster, etc.)
             name: Optional display name
 
         Returns:
             RegisterResult with agent_id, api_key, config, and policies
         """
-        response = self._post('/register', {
+        response = self._post('/agents/register', {
             'agent_id': self.agent_id,
             'agent_type': self.agent_type,
-            'capabilities': capabilities,
+            'capabilities': capabilities or [],
             'metadata': metadata or {},
             'name': name,
         })
@@ -503,11 +473,9 @@ class SentinelClient:
         self.agent_id = response['agent_id']
         self._registered = True
 
-        # Cache the config
         self._config_cache = response.get('config', {})
         self._config_cache_time = datetime.utcnow()
 
-        # Update API key if new one provided
         if response.get('api_key'):
             self.api_key = response['api_key']
 
@@ -530,8 +498,7 @@ class SentinelClient:
 
     def get_config(self, force_refresh: bool = False) -> ConfigResult:
         """
-        Get current config and policies.
-        Results are cached for config_cache_ttl seconds.
+        Get current config and policies (cached).
 
         Args:
             force_refresh: Bypass cache and fetch fresh config
@@ -539,17 +506,16 @@ class SentinelClient:
         Returns:
             ConfigResult with config and policies
         """
-        # Check cache
         if not force_refresh and self._config_cache and self._config_cache_time:
             if datetime.utcnow() - self._config_cache_time < self._config_cache_ttl:
                 return ConfigResult(
                     agent_id=self.agent_id,
                     config=self._config_cache,
-                    policies=[],  # Would need to cache policies too
+                    policies=[],
                     updated_at=self._config_cache_time,
                 )
 
-        response = self._get(f'/config/{self.agent_id}')
+        response = self._get(f'/agents/{self.agent_id}/config')
 
         self._config_cache = response.get('config', {})
         self._config_cache_time = datetime.utcnow()
@@ -559,22 +525,16 @@ class SentinelClient:
         ]
 
         return ConfigResult(
-            agent_id=response['agent_id'],
+            agent_id=response.get('agent_id', self.agent_id),
             config=response.get('config', {}),
             policies=policies,
-            updated_at=datetime.fromisoformat(response['updated_at'].replace('Z', '+00:00')),
+            updated_at=datetime.fromisoformat(
+                response.get('updated_at', datetime.utcnow().isoformat()).replace('Z', '+00:00')
+            ),
         )
 
     def get_policies(self, policy_types: Optional[List[str]] = None) -> List[PolicyConfig]:
-        """
-        Get effective policies for this agent.
-
-        Args:
-            policy_types: Optional filter by policy types
-
-        Returns:
-            List of PolicyConfig objects
-        """
+        """Get effective policies for this agent."""
         config_result = self.get_config()
         policies = config_result.policies
 
@@ -589,8 +549,7 @@ class SentinelClient:
 
     def get_secrets(self, force_refresh: bool = False) -> Dict[str, str]:
         """
-        Get secrets this agent can access.
-        Results are cached for secrets_cache_ttl seconds.
+        Get secrets this agent can access (cached).
 
         Args:
             force_refresh: Bypass cache and fetch fresh secrets
@@ -598,12 +557,11 @@ class SentinelClient:
         Returns:
             Dictionary of secret name -> value
         """
-        # Check cache
         if not force_refresh and self._secrets_cache and self._secrets_cache_time:
             if datetime.utcnow() - self._secrets_cache_time < self._secrets_cache_ttl:
                 return self._secrets_cache
 
-        response = self._get(f'/secrets/{self.agent_id}')
+        response = self._get(f'/agents/{self.agent_id}/secrets')
 
         self._secrets_cache = response.get('secrets', {})
         self._secrets_cache_time = datetime.utcnow()
@@ -611,16 +569,7 @@ class SentinelClient:
         return self._secrets_cache
 
     def get_secret(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        """
-        Get a single secret value.
-
-        Args:
-            key: Secret key name
-            default: Default value if not found
-
-        Returns:
-            Secret value or default
-        """
+        """Get a single secret value."""
         secrets = self.get_secrets()
         return secrets.get(key, default)
 
@@ -636,10 +585,9 @@ class SentinelClient:
     ) -> EvaluateResult:
         """
         Evaluate policies for an action.
-        Use this before critical operations like spawning servers.
 
         Args:
-            action: The action to evaluate (e.g., "spawn", "tool_call")
+            action: The action to evaluate (e.g., "tool_call", "model_request")
             user_id: User performing the action
             context: Additional context for evaluation
 
@@ -654,41 +602,46 @@ class SentinelClient:
         })
 
         return EvaluateResult(
-            allowed=response['allowed'],
+            allowed=response.get('allowed', True),
             reason=response.get('reason'),
             policies_evaluated=response.get('policies_evaluated', []),
             warnings=response.get('warnings', []),
             context=response.get('context', {}),
         )
 
-    def can_spawn(
-        self,
-        user_id: str,
-        service: str,
-        instance_size: str,
-        current_server_count: int = 0,
-    ) -> EvaluateResult:
+    def can_use_model(self, model: str, provider: str = 'openai') -> EvaluateResult:
+        """Check if a specific model can be used."""
+        return self.evaluate(
+            action='model_request',
+            context={'model': model, 'provider': provider}
+        )
+
+    def can_call_tool(self, tool_name: str, user_id: Optional[str] = None) -> EvaluateResult:
+        """Check if a tool can be called."""
+        return self.evaluate(
+            action='tool_call',
+            user_id=user_id,
+            context={'tool': tool_name}
+        )
+
+    # =========================================================================
+    # Usage Tracking
+    # =========================================================================
+
+    def track_usage(self, usage: ModelUsage) -> None:
         """
-        Convenience method to check if spawning is allowed.
+        Track model usage for cost policies.
 
         Args:
-            user_id: User requesting spawn
-            service: Service type (lab, chat, etc.)
-            instance_size: Instance size requested
-            current_server_count: Current number of servers
-
-        Returns:
-            EvaluateResult
+            usage: ModelUsage object (use from_openai/from_anthropic helpers)
         """
-        return self.evaluate(
-            action='spawn',
-            user_id=user_id,
-            context={
-                'service': service,
-                'instance_size': instance_size,
-                'current_server_count': current_server_count,
-            }
-        )
+        self.emit('model_usage', {
+            'provider': usage.provider,
+            'model': usage.model,
+            'input_tokens': usage.input_tokens,
+            'output_tokens': usage.output_tokens,
+            'estimated_cost': usage.estimated_cost,
+        }, category=EventCategory.TELEMETRY.value)
 
     # =========================================================================
     # Events
@@ -703,12 +656,11 @@ class SentinelClient:
     ) -> None:
         """
         Emit an event (buffered, async).
-        Events are batched and sent periodically.
 
         Args:
-            event_type: Type of event (spawn, stop, ai_request, etc.)
+            event_type: Type of event (tool_call, model_request, etc.)
             payload: Event data
-            category: Event category (telemetry, audit, alert)
+            category: Event category (telemetry, audit, alert, compliance)
             user_id: User associated with event
         """
         event = {
@@ -722,41 +674,41 @@ class SentinelClient:
         with self._buffer_lock:
             self._event_buffer.append(event)
 
-            # Flush if buffer is full
             if len(self._event_buffer) >= self._event_buffer_size:
                 self._flush_events_sync()
 
-    def emit_spawn(self, user_id: str, service: str, instance_size: str) -> None:
-        """Convenience: emit spawn event."""
-        self.emit('spawn', {
-            'user_id': user_id,
-            'service': service,
-            'instance_size': instance_size,
-        }, category='audit', user_id=user_id)
-
-    def emit_stop(self, user_id: str, service: str, duration_seconds: int) -> None:
-        """Convenience: emit stop event."""
-        self.emit('stop', {
-            'user_id': user_id,
-            'service': service,
-            'duration_seconds': duration_seconds,
-        }, category='audit', user_id=user_id)
-
-    def emit_ai_request(
+    def emit_tool_call(
         self,
-        user_id: str,
+        tool_name: str,
+        user_id: Optional[str] = None,
+        inputs: Optional[Dict] = None,
+        outputs: Optional[Dict] = None,
+        duration_ms: Optional[int] = None,
+    ) -> None:
+        """Emit a tool call event."""
+        self.emit('tool_call', {
+            'tool': tool_name,
+            'inputs': inputs or {},
+            'outputs': outputs or {},
+            'duration_ms': duration_ms,
+        }, category='audit', user_id=user_id)
+
+    def emit_model_request(
+        self,
         provider: str,
         model: str,
         input_tokens: int,
         output_tokens: int,
+        user_id: Optional[str] = None,
+        duration_ms: Optional[int] = None,
     ) -> None:
-        """Convenience: emit AI request event for token tracking."""
-        self.emit('ai_request', {
-            'user_id': user_id,
+        """Emit a model request event."""
+        self.emit('model_request', {
             'provider': provider,
             'model': model,
             'input_tokens': input_tokens,
             'output_tokens': output_tokens,
+            'duration_ms': duration_ms,
         }, category='telemetry', user_id=user_id)
 
     def flush_events(self) -> Optional[EventsResult]:
@@ -779,12 +731,11 @@ class SentinelClient:
             })
             logger.debug(f"Flushed {len(events)} events")
             return EventsResult(
-                accepted=response['accepted'],
-                batch_id=response['batch_id'],
+                accepted=response.get('accepted', len(events)),
+                batch_id=response.get('batch_id', ''),
             )
         except Exception as e:
             logger.warning(f"Failed to flush events: {e}")
-            # Re-queue events on failure (with limit)
             with self._buffer_lock:
                 if len(self._event_buffer) < self._event_buffer_size * 2:
                     self._event_buffer = events + self._event_buffer
@@ -802,34 +753,48 @@ class SentinelClient:
     # Heartbeat
     # =========================================================================
 
-    def heartbeat(self, status: str = 'healthy', metrics: Optional[Dict] = None) -> None:
+    def heartbeat(
+        self,
+        status: str = 'healthy',
+        metrics: Optional[Dict] = None,
+    ) -> Optional[HeartbeatResult]:
         """
-        Send heartbeat to Sentinel.
-        Called automatically if auto_heartbeat is enabled.
+        Send heartbeat to Zentinelle.
 
         Args:
             status: Health status (healthy, degraded, unhealthy)
             metrics: Optional metrics to include
+
+        Returns:
+            HeartbeatResult or None if failed
         """
         if not self._registered or not self.agent_id:
-            return
+            return None
 
         try:
-            self._post('/heartbeat', {
+            response = self._post('/heartbeat', {
                 'agent_id': self.agent_id,
                 'status': status,
                 'metrics': metrics or {},
             })
             logger.debug(f"Sent heartbeat: {status}")
+            return HeartbeatResult(
+                acknowledged=response.get('acknowledged', True),
+                config_changed=response.get('config_changed', False),
+                next_heartbeat_seconds=response.get('next_heartbeat_seconds', 60),
+            )
         except Exception as e:
             logger.warning(f"Failed to send heartbeat: {e}")
+            return None
 
     def _heartbeat_loop(self) -> None:
         """Background thread: send heartbeats periodically."""
         while self._running:
             time.sleep(self._heartbeat_interval)
             if self._registered:
-                self.heartbeat()
+                result = self.heartbeat()
+                if result and result.config_changed:
+                    self.get_config(force_refresh=True)
 
     # =========================================================================
     # Lifecycle
@@ -837,10 +802,9 @@ class SentinelClient:
 
     def shutdown(self) -> None:
         """Graceful shutdown: stop threads and flush remaining events."""
-        logger.info("Shutting down Sentinel client")
+        logger.info("Shutting down Zentinelle client")
         self._running = False
 
-        # Final flush
         with self._buffer_lock:
             self._flush_events_sync()
 
