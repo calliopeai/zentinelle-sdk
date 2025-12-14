@@ -36,6 +36,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"strings"
 	"sync"
@@ -293,7 +294,51 @@ func (c *Client) backoffDelay(attempt int) time.Duration {
 	if delay > 60*time.Second {
 		delay = 60 * time.Second
 	}
+	// Add jitter (±25%) to prevent thundering herd
+	jitterRange := float64(delay) * 0.25
+	jitter := time.Duration((rand.Float64()*2 - 1) * jitterRange)
+	delay += jitter
+	if delay < 0 {
+		delay = 0
+	}
 	return delay
+}
+
+// requestForEvaluate makes an HTTP request with proper fail-open handling for evaluate.
+func (c *Client) requestForEvaluate(ctx context.Context, method, path string, body interface{}) ([]byte, bool, error) {
+	if !c.circuitBreaker.CanExecute() {
+		if c.config.FailOpen {
+			log.Printf("[Zentinelle] Circuit breaker OPEN, failing open for evaluate request")
+			return c.createFailOpenEvaluateResponse(), true, nil
+		}
+		return nil, false, &ConnectionError{Message: "circuit breaker is open"}
+	}
+
+	resp, err := c.request(ctx, method, path, body)
+	if err != nil {
+		if c.config.FailOpen {
+			if _, ok := err.(*ConnectionError); ok {
+				log.Printf("[Zentinelle] Request failed, failing open: %v", err)
+				return c.createFailOpenEvaluateResponse(), true, nil
+			}
+		}
+		return nil, false, err
+	}
+	return resp, false, nil
+}
+
+// createFailOpenEvaluateResponse creates a proper fail-open response for evaluate.
+func (c *Client) createFailOpenEvaluateResponse() []byte {
+	response := map[string]interface{}{
+		"allowed":            true,
+		"reason":             "fail_open",
+		"fail_open":          true,
+		"policies_evaluated": []interface{}{},
+		"warnings":           []string{"Service unavailable - fail-open mode active"},
+		"context":            map[string]interface{}{},
+	}
+	data, _ := json.Marshal(response)
+	return data
 }
 
 // RegisterOptions holds options for agent registration.
@@ -398,9 +443,26 @@ func (c *Client) Evaluate(ctx context.Context, action string, opts EvaluateOptio
 		"context":  opts.Context,
 	}
 
-	resp, err := c.request(ctx, http.MethodPost, "/evaluate", body)
+	resp, isFailOpen, err := c.requestForEvaluate(ctx, http.MethodPost, "/evaluate", body)
 	if err != nil {
 		return nil, err
+	}
+
+	// Parse into raw map first to validate 'allowed' field exists
+	var rawResult map[string]interface{}
+	if err := json.Unmarshal(resp, &rawResult); err != nil {
+		return nil, err
+	}
+
+	// Check for fail-open response
+	failOpen := getBool(rawResult, "fail_open") || isFailOpen
+
+	// Critical: validate that 'allowed' field is present (unless fail-open)
+	// Never default to true - this would bypass security
+	if !failOpen {
+		if _, hasAllowed := rawResult["allowed"]; !hasAllowed {
+			return nil, &Error{Message: "invalid response: missing required 'allowed' field"}
+		}
 	}
 
 	var result struct {
@@ -409,6 +471,7 @@ func (c *Client) Evaluate(ctx context.Context, action string, opts EvaluateOptio
 		PoliciesEvaluated []map[string]interface{} `json:"policies_evaluated"`
 		Warnings          []string                 `json:"warnings"`
 		Context           map[string]interface{}   `json:"context"`
+		FailOpen          bool                     `json:"fail_open"`
 	}
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, err
@@ -430,6 +493,7 @@ func (c *Client) Evaluate(ctx context.Context, action string, opts EvaluateOptio
 		PoliciesEvaluated: policies,
 		Warnings:          result.Warnings,
 		Context:           result.Context,
+		FailOpen:          failOpen,
 	}, nil
 }
 
@@ -644,6 +708,19 @@ func (c *Client) IsRegistered() bool {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()
 	return c.registered
+}
+
+// String returns a string representation of the client with masked API key.
+func (c *Client) String() string {
+	maskedKey := "***"
+	if len(c.config.APIKey) > 12 {
+		maskedKey = c.config.APIKey[:8] + "..." + c.config.APIKey[len(c.config.APIKey)-4:]
+	}
+	c.stateMu.RLock()
+	agentID := c.agentID
+	c.stateMu.RUnlock()
+	return fmt.Sprintf("ZentinelleClient(agent_id=%q, agent_type=%q, endpoint=%q, api_key=%q)",
+		agentID, c.config.AgentType, c.config.Endpoint, maskedKey)
 }
 
 // Helper functions

@@ -51,6 +51,7 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         HttpClient? httpClient = null)
     {
         _options = options ?? throw new ArgumentNullException(nameof(options));
+        _logger = logger ?? NullLogger<ZentinelleClient>.Instance;
 
         // Validate API key
         if (string.IsNullOrWhiteSpace(options.ApiKey) || options.ApiKey.Length < 10)
@@ -62,7 +63,7 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         var validPrefixes = new[] { "sk_agent_", "sk_test_", "sk_live_", "znt_" };
         if (!validPrefixes.Any(prefix => options.ApiKey.StartsWith(prefix, StringComparison.Ordinal)))
         {
-            _logger?.LogWarning(
+            _logger.LogWarning(
                 "API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*). " +
                 "This may indicate an invalid key.");
         }
@@ -82,8 +83,6 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         {
             throw new ArgumentException("BaseUrl must use HTTPS for security", nameof(options));
         }
-
-        _logger = logger ?? NullLogger<ZentinelleClient>.Instance;
 
         // Track whether we own the HttpClient (and should dispose it) or if it was injected
         _ownsHttpClient = httpClient == null;
@@ -234,11 +233,14 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
             context = options?.Context
         };
 
-        return await SendRequestAsync<EvaluateResult>(
+        var result = await SendRequestAsync<EvaluateResult>(
             HttpMethod.Post,
             "/api/v1/evaluate",
             request,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            validateAllowedField: true).ConfigureAwait(false);
+
+        return result;
     }
 
     /// <summary>
@@ -260,25 +262,27 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         evt.Timestamp ??= DateTime.UtcNow;
         evt.AgentId ??= _options.AgentId;
 
-        // Enforce max buffer size to prevent memory leaks
-        // Use a snapshot of count and drop a fixed number to avoid race conditions
-        var currentCount = _eventBuffer.Count;
-        if (currentCount >= _maxBufferSize)
+        // Use lock to prevent race conditions during buffer size enforcement
+        lock (_eventBuffer)
         {
-            // Drop enough events to make room, plus a small buffer to reduce frequency of drops
-            var toDrop = Math.Max(1, currentCount - _maxBufferSize + 10);
-            var dropped = 0;
-            for (var i = 0; i < toDrop && _eventBuffer.TryDequeue(out _); i++)
+            // Enforce max buffer size to prevent memory leaks
+            if (_eventBuffer.Count >= _maxBufferSize)
             {
-                dropped++;
+                // Drop enough events to make room, plus a small buffer to reduce frequency of drops
+                var toDrop = Math.Max(1, _eventBuffer.Count - _maxBufferSize + 10);
+                var dropped = 0;
+                for (var i = 0; i < toDrop && _eventBuffer.TryDequeue(out _); i++)
+                {
+                    dropped++;
+                }
+                if (dropped > 0)
+                {
+                    _logger.LogWarning("Event buffer at max capacity, dropped {Count} oldest events", dropped);
+                }
             }
-            if (dropped > 0)
-            {
-                _logger.LogWarning("Event buffer at max capacity, dropped {Count} oldest events", dropped);
-            }
-        }
 
-        _eventBuffer.Enqueue(evt);
+            _eventBuffer.Enqueue(evt);
+        }
 
         if (_eventBuffer.Count >= _options.MaxBatchSize)
         {
@@ -356,9 +360,10 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         if (!await _flushLock.WaitAsync(0, cancellationToken).ConfigureAwait(false))
             return; // Another flush is in progress
 
+        List<Event>? events = null;
         try
         {
-            var events = new List<Event>();
+            events = new List<Event>();
             while (events.Count < _options.MaxBatchSize && _eventBuffer.TryDequeue(out var evt))
             {
                 events.Add(evt);
@@ -374,10 +379,37 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
                 cancellationToken).ConfigureAwait(false);
 
             _logger.LogDebug("Flushed {Count} events", events.Count);
+            events = null; // Clear reference so we don't re-queue on success
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to flush events");
+
+            // Re-queue events on failure (check against maxBufferSize to avoid overflow)
+            if (events != null && events.Count > 0)
+            {
+                lock (_eventBuffer)
+                {
+                    if (_eventBuffer.Count + events.Count <= _maxBufferSize)
+                    {
+                        // Re-queue at the front by creating a new queue
+                        var newBuffer = new ConcurrentQueue<Event>(events);
+                        while (_eventBuffer.TryDequeue(out var existing))
+                        {
+                            newBuffer.Enqueue(existing);
+                        }
+                        // Copy back
+                        while (newBuffer.TryDequeue(out var evt))
+                        {
+                            _eventBuffer.Enqueue(evt);
+                        }
+                    }
+                    else
+                    {
+                        _logger.LogWarning("Failed to flush {Count} events and buffer is full, events dropped", events.Count);
+                    }
+                }
+            }
         }
         finally
         {
@@ -416,7 +448,8 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         HttpMethod method,
         string path,
         object? body,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool validateAllowedField = false)
     {
         if (!_circuitBreaker.CanExecute())
         {
@@ -449,6 +482,21 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
                 {
                     _circuitBreaker.RecordSuccess();
                     var content = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+
+                    // For evaluate requests, validate that 'allowed' field is present
+                    // Never default to true - this would bypass security
+                    if (validateAllowedField)
+                    {
+                        using var doc = JsonDocument.Parse(content);
+                        var isFailOpen = doc.RootElement.TryGetProperty("fail_open", out var failOpenProp) &&
+                                         failOpenProp.ValueKind == JsonValueKind.True;
+
+                        if (!isFailOpen && !doc.RootElement.TryGetProperty("allowed", out _))
+                        {
+                            throw new ZentinelleException("Invalid response: missing required 'allowed' field");
+                        }
+                    }
+
                     return JsonSerializer.Deserialize<T>(content, JsonOptions)!;
                 }
 
@@ -537,6 +585,19 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
             };
         }
         return default!;
+    }
+
+    /// <summary>
+    /// Returns a string representation of the client with masked API key.
+    /// </summary>
+    public override string ToString()
+    {
+        var maskedKey = "***";
+        if (_options.ApiKey.Length > 12)
+        {
+            maskedKey = _options.ApiKey[..8] + "..." + _options.ApiKey[^4..];
+        }
+        return $"ZentinelleClient(agent_id=\"{_options.AgentId}\", agent_type=\"{_options.AgentType}\", endpoint=\"{_options.BaseUrl}\", api_key=\"{maskedKey}\")";
     }
 
     /// <inheritdoc />

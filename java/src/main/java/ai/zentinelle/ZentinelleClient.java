@@ -89,6 +89,12 @@ public class ZentinelleClient implements AutoCloseable {
     private final ScheduledExecutorService scheduler;
     private volatile boolean shutdown = false;
 
+    // Secrets cache
+    private volatile Map<String, String> secretsCache = null;
+    private volatile Instant secretsCacheTime = null;
+    private final Duration secretsCacheTtl;
+    private final Object secretsCacheLock = new Object();
+
     private ZentinelleClient(Builder builder) {
         this.apiKey = Objects.requireNonNull(builder.apiKey, "apiKey is required");
         if (this.apiKey.length() < 10) {
@@ -129,6 +135,9 @@ public class ZentinelleClient implements AutoCloseable {
             builder.circuitBreakerThreshold > 0 ? builder.circuitBreakerThreshold : 5,
             builder.circuitBreakerTimeout != null ? builder.circuitBreakerTimeout : Duration.ofSeconds(30)
         );
+
+        // Secrets cache TTL (default 60 seconds)
+        this.secretsCacheTtl = builder.secretsCacheTtl != null ? builder.secretsCacheTtl : Duration.ofSeconds(60);
 
         // Start background flush
         Duration flushInterval = builder.flushInterval != null ? builder.flushInterval : DEFAULT_FLUSH_INTERVAL;
@@ -252,11 +261,41 @@ public class ZentinelleClient implements AutoCloseable {
     }
 
     /**
-     * Retrieves secrets for the agent.
+     * Retrieves secrets for the agent (cached).
      */
     public Map<String, String> getSecrets() throws ZentinelleException {
+        return getSecrets(false);
+    }
+
+    /**
+     * Retrieves secrets for the agent with optional cache bypass.
+     *
+     * @param forceRefresh if true, bypasses the cache and fetches fresh secrets
+     * @return map of secret name to value
+     */
+    public Map<String, String> getSecrets(boolean forceRefresh) throws ZentinelleException {
+        // Thread-safe cache check
+        if (!forceRefresh) {
+            synchronized (secretsCacheLock) {
+                if (secretsCache != null && secretsCacheTime != null &&
+                    Duration.between(secretsCacheTime, Instant.now()).compareTo(secretsCacheTtl) < 0) {
+                    // Return a copy to prevent modification
+                    return new HashMap<>(secretsCache);
+                }
+            }
+        }
+
         Map<String, Object> response = request("GET", "/agents/" + agentId + "/secrets", null);
-        return castToStringMap(response.get("secrets"));
+        Map<String, String> secrets = castToStringMap(response.get("secrets"));
+
+        // Update cache
+        synchronized (secretsCacheLock) {
+            secretsCache = secrets;
+            secretsCacheTime = Instant.now();
+        }
+
+        // Return a copy to prevent modification
+        return new HashMap<>(secrets);
     }
 
     /**
@@ -288,9 +327,7 @@ public class ZentinelleClient implements AutoCloseable {
             // Enforce max buffer size to prevent memory leaks
             if (eventBuffer.size() >= maxBufferSize) {
                 int dropped = eventBuffer.size() - maxBufferSize + 1;
-                for (int i = 0; i < dropped; i++) {
-                    eventBuffer.remove(0);
-                }
+                eventBuffer.subList(0, dropped).clear();  // O(n) instead of O(n²)
                 log.warn("Event buffer at max capacity, dropped {} oldest events", dropped);
             }
             eventBuffer.add(event);
@@ -417,6 +454,19 @@ public class ZentinelleClient implements AutoCloseable {
      */
     public boolean isRegistered() {
         return registered.get();
+    }
+
+    /**
+     * Returns a string representation of the client with masked API key.
+     */
+    @Override
+    public String toString() {
+        String maskedKey = "***";
+        if (apiKey.length() > 12) {
+            maskedKey = apiKey.substring(0, 8) + "..." + apiKey.substring(apiKey.length() - 4);
+        }
+        return String.format("ZentinelleClient(agent_id=\"%s\", agent_type=\"%s\", endpoint=\"%s\", api_key=\"%s\")",
+            agentId, agentType, endpoint, maskedKey);
     }
 
     // HTTP request handling for evaluate (with proper fail-open response)
@@ -649,6 +699,7 @@ public class ZentinelleClient implements AutoCloseable {
         private Duration flushInterval;
         private int circuitBreakerThreshold;
         private Duration circuitBreakerTimeout;
+        private Duration secretsCacheTtl;
 
         public Builder apiKey(String apiKey) { this.apiKey = apiKey; return this; }
         public Builder agentType(String agentType) { this.agentType = agentType; return this; }
@@ -662,6 +713,7 @@ public class ZentinelleClient implements AutoCloseable {
         public Builder flushInterval(Duration flushInterval) { this.flushInterval = flushInterval; return this; }
         public Builder circuitBreakerThreshold(int threshold) { this.circuitBreakerThreshold = threshold; return this; }
         public Builder circuitBreakerTimeout(Duration timeout) { this.circuitBreakerTimeout = timeout; return this; }
+        public Builder secretsCacheTtl(Duration ttl) { this.secretsCacheTtl = ttl; return this; }
 
         public ZentinelleClient build() {
             return new ZentinelleClient(this);

@@ -500,7 +500,9 @@ export class ZentinelleClient {
     this.eventBuffer.push(event);
 
     if (this.eventBuffer.length >= this.bufferSize) {
-      this.flushEvents().catch(() => {});
+      this.flushEvents().catch((err) => {
+        console.warn('[Zentinelle] Buffer flush failed:', err?.message ?? String(err));
+      });
     }
   }
 
@@ -611,7 +613,8 @@ export class ZentinelleClient {
         configChanged: response.config_changed,
         nextHeartbeatSeconds: response.next_heartbeat_seconds,
       };
-    } catch {
+    } catch (error) {
+      console.debug('[Zentinelle] Heartbeat failed:', error instanceof Error ? error.message : String(error));
       return null;
     }
   }
@@ -647,5 +650,15 @@ export class ZentinelleClient {
 
   get currentAgentId(): string | null {
     return this.agentId;
+  }
+
+  /**
+   * Returns a string representation of the client with masked API key.
+   */
+  toString(): string {
+    const maskedKey = this.apiKey.length > 12
+      ? `${this.apiKey.slice(0, 8)}...${this.apiKey.slice(-4)}`
+      : '***';
+    return `ZentinelleClient(agentId="${this.agentId}", agentType="${this.agentType}", endpoint="${this.endpoint}", apiKey="${maskedKey}")`;
   }
 }
