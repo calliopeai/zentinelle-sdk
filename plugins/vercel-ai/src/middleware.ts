@@ -66,6 +66,45 @@ export interface MiddlewareResult {
  * }
  * ```
  */
+/**
+ * Model name patterns for provider detection.
+ */
+const PROVIDER_PATTERNS: Record<string, string[]> = {
+  openai: ['gpt-', 'text-davinci', 'text-curie', 'text-babbage', 'text-ada', 'o1-', 'chatgpt'],
+  anthropic: ['claude-', 'anthropic'],
+  google: ['gemini-', 'palm-', 'bison', 'gecko'],
+  cohere: ['command', 'cohere'],
+  mistral: ['mistral', 'mixtral'],
+  meta: ['llama', 'codellama'],
+  together: ['togethercomputer/', 'together/'],
+  groq: ['groq/'],
+  fireworks: ['fireworks/', 'accounts/fireworks'],
+  huggingface: ['huggingface/', 'hf/'],
+  deepseek: ['deepseek'],
+  ai21: ['j2-', 'jamba'],
+  perplexity: ['pplx-', 'sonar'],
+  aws_bedrock: ['amazon.', 'bedrock/'],
+  azure_openai: ['azure/'],
+};
+
+/**
+ * Detect AI provider from model name.
+ */
+function detectProvider(model?: string): string {
+  if (!model) return 'unknown';
+  const modelLower = model.toLowerCase();
+
+  for (const [provider, patterns] of Object.entries(PROVIDER_PATTERNS)) {
+    for (const pattern of patterns) {
+      if (modelLower.includes(pattern)) {
+        return provider;
+      }
+    }
+  }
+
+  return 'unknown';
+}
+
 export class ZentinelleMiddleware {
   private client: ZentinelleClient;
   private options: MiddlewareOptions;
@@ -152,15 +191,21 @@ export class ZentinelleMiddleware {
 
   /**
    * Track a completion after it's finished.
+   *
+   * @param result - The completion result with usage stats
+   * @param userId - User ID for tracking
+   * @param model - Model name (used for provider detection if not specified)
+   * @param provider - Explicit provider override (optional)
    */
   trackCompletion(
     result: { usage?: { promptTokens: number; completionTokens: number } },
     userId?: string,
-    model?: string
+    model?: string,
+    provider?: string
   ): void {
     if (result.usage) {
       this.client.emitModelRequest({
-        provider: 'openai', // TODO: detect from result
+        provider: provider ?? detectProvider(model),
         model: model ?? 'unknown',
         inputTokens: result.usage.promptTokens,
         outputTokens: result.usage.completionTokens,

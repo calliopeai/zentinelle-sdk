@@ -86,6 +86,66 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
         )
 
     # =========================================================================
+    # Provider Detection
+    # =========================================================================
+
+    # Model name patterns for provider detection
+    _PROVIDER_PATTERNS = {
+        'openai': ['gpt-', 'text-davinci', 'text-curie', 'text-babbage', 'text-ada', 'o1-', 'chatgpt'],
+        'anthropic': ['claude-', 'anthropic'],
+        'google': ['gemini-', 'palm-', 'bison', 'gecko'],
+        'cohere': ['command', 'cohere'],
+        'mistral': ['mistral', 'mixtral'],
+        'meta': ['llama', 'codellama'],
+        'together': ['togethercomputer/', 'together/'],
+        'groq': ['groq/'],
+        'fireworks': ['fireworks/', 'accounts/fireworks'],
+        'huggingface': ['huggingface/', 'hf/'],
+        'deepseek': ['deepseek'],
+        'ai21': ['j2-', 'jamba'],
+        'perplexity': ['pplx-', 'sonar'],
+        'aws_bedrock': ['amazon.', 'bedrock/'],
+        'azure_openai': ['azure/'],
+    }
+
+    def _detect_provider(
+        self,
+        model: str,
+        llm_output: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        Detect AI provider from model name or response metadata.
+
+        Args:
+            model: Model name/identifier
+            llm_output: LLM response output dict
+
+        Returns:
+            Provider slug (e.g., 'openai', 'anthropic')
+        """
+        model_lower = model.lower() if model else ''
+
+        # Check llm_output for explicit provider info
+        if llm_output:
+            # Some LangChain integrations include provider in output
+            if 'provider' in llm_output:
+                return llm_output['provider']
+            if 'model_provider' in llm_output:
+                return llm_output['model_provider']
+            # OpenAI specific
+            if 'system_fingerprint' in llm_output:
+                return 'openai'
+
+        # Match model name against known patterns
+        for provider, patterns in self._PROVIDER_PATTERNS.items():
+            for pattern in patterns:
+                if pattern in model_lower:
+                    return provider
+
+        # Fallback to unknown
+        return 'unknown'
+
+    # =========================================================================
     # LLM Callbacks
     # =========================================================================
 
@@ -140,10 +200,13 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
         input_tokens = token_usage.get('prompt_tokens', 0)
         output_tokens = token_usage.get('completion_tokens', 0)
 
+        # Detect provider from model name or response metadata
+        provider = self._detect_provider(model, response.llm_output)
+
         # Track usage for cost policies
         if input_tokens or output_tokens:
             self.client.track_usage(ModelUsage(
-                provider='openai',  # TODO: detect from response
+                provider=provider,
                 model=model,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
