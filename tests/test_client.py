@@ -206,3 +206,57 @@ class TestZentinelleExceptions:
         assert issubclass(ZentinelleConnectionError, ZentinelleError)
         assert issubclass(ZentinelleAuthError, ZentinelleError)
         assert issubclass(ZentinelleRateLimitError, ZentinelleError)
+
+
+class TestEvaluateFailOpen:
+    """Tests for evaluate method fail-open behavior."""
+
+    def test_evaluate_validates_allowed_field(self):
+        """Evaluate should raise if 'allowed' field is missing (not fail-open)."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            # Mock _post_for_evaluate to return response without 'allowed'
+            with patch.object(client, '_post_for_evaluate', return_value={'reason': 'test'}):
+                with pytest.raises(ZentinelleError, match="missing required 'allowed' field"):
+                    client.evaluate("test_action")
+            client._running = False
+
+    def test_evaluate_accepts_fail_open_response(self):
+        """Evaluate should accept response without 'allowed' if fail_open=True."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            # Mock _post_for_evaluate to return fail-open response
+            with patch.object(client, '_post_for_evaluate', return_value={
+                'allowed': True,
+                'reason': 'fail_open',
+                'fail_open': True,
+            }):
+                result = client.evaluate("test_action")
+                assert result.allowed is True
+                assert result.fail_open is True
+            client._running = False
+
+    def test_evaluate_result_has_fail_open_field(self):
+        """EvaluateResult should have fail_open field."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            with patch.object(client, '_post_for_evaluate', return_value={
+                'allowed': False,
+                'reason': 'blocked by policy',
+            }):
+                result = client.evaluate("test_action")
+                assert result.allowed is False
+                assert result.fail_open is False
+            client._running = False
