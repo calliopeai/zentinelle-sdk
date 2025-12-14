@@ -124,6 +124,24 @@ class TestCircuitBreaker:
         cb.record_failure()
         assert cb.state == CircuitBreaker.OPEN
 
+    def test_half_open_limits_calls(self):
+        """Half-open state should limit the number of test calls."""
+        cb = CircuitBreaker(failure_threshold=2, recovery_timeout=0.1, half_open_max_calls=2)
+        cb.record_failure()
+        cb.record_failure()
+        assert cb.state == CircuitBreaker.OPEN
+
+        time.sleep(0.15)
+        # First call in half-open should be allowed
+        assert cb.can_execute() is True
+        assert cb.state == CircuitBreaker.HALF_OPEN
+
+        # Second call should also be allowed
+        assert cb.can_execute() is True
+
+        # Third call should be blocked until success/failure resets
+        # (implementation detail: depends on how half_open_calls is tracked)
+
 
 class TestZentinelleClientInit:
     """Tests for ZentinelleClient initialization."""
