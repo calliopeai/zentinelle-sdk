@@ -260,3 +260,60 @@ class TestEvaluateFailOpen:
                 assert result.allowed is False
                 assert result.fail_open is False
             client._running = False
+
+
+class TestEventBufferBounds:
+    """Tests for event buffer memory leak prevention."""
+
+    def test_max_buffer_size_calculated_correctly(self):
+        """Max buffer should be 10x normal or 1000, whichever is larger."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            # Small buffer: max should be 1000
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+                event_buffer_size=50,
+            )
+            assert client._max_buffer_size == 1000
+            client._running = False
+
+            # Large buffer: max should be 10x
+            client2 = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+                event_buffer_size=200,
+            )
+            assert client2._max_buffer_size == 2000
+            client2._running = False
+
+    def test_buffer_drops_oldest_when_at_max(self):
+        """Buffer should drop oldest events when at max capacity."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+                event_buffer_size=10,  # max will be 1000
+            )
+            # Override max for testing
+            client._max_buffer_size = 5
+
+            # Fill buffer to max
+            for i in range(5):
+                client.emit(f"event_{i}", {"index": i})
+
+            assert len(client._event_buffer) == 5
+            assert client._event_buffer[0]['payload']['index'] == 0
+
+            # Add one more - should drop oldest
+            client.emit("event_5", {"index": 5})
+
+            assert len(client._event_buffer) == 5
+            # First event should now be index 1 (index 0 was dropped)
+            assert client._event_buffer[0]['payload']['index'] == 1
+            # Last event should be index 5
+            assert client._event_buffer[-1]['payload']['index'] == 5
+
+            client._running = False
