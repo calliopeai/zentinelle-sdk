@@ -10,6 +10,11 @@ from llama_index.core.callbacks.schema import CBEventType, EventPayload
 from zentinelle import ZentinelleClient
 from zentinelle.types import ModelUsage
 
+# Maximum age for timing entries before cleanup (5 minutes)
+_MAX_TIMING_AGE_SECONDS = 300
+# Maximum number of timing entries before forced cleanup
+_MAX_TIMING_ENTRIES = 1000
+
 
 class ZentinelleCallbackHandler(BaseCallbackHandler):
     """
@@ -63,6 +68,28 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
 
         self._event_times: Dict[str, float] = {}
         self._event_data: Dict[str, Dict[str, Any]] = {}
+        self._last_cleanup_time = time.time()
+
+    def _cleanup_stale_timings(self) -> None:
+        """Remove stale timing entries to prevent memory leaks."""
+        now = time.time()
+
+        # Only cleanup if enough time has passed or buffer is too large
+        if (now - self._last_cleanup_time < 60 and
+                len(self._event_times) < _MAX_TIMING_ENTRIES):
+            return
+
+        self._last_cleanup_time = now
+        cutoff = now - _MAX_TIMING_AGE_SECONDS
+
+        # Remove entries older than cutoff
+        stale_ids = [
+            event_id for event_id, start_time in self._event_times.items()
+            if start_time < cutoff
+        ]
+        for event_id in stale_ids:
+            del self._event_times[event_id]
+            self._event_data.pop(event_id, None)
 
     def on_event_start(
         self,
@@ -73,6 +100,7 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
         **kwargs: Any,
     ) -> str:
         """Called when an event starts."""
+        self._cleanup_stale_timings()
         self._event_times[event_id] = time.time()
         self._event_data[event_id] = payload or {}
 
@@ -114,18 +142,18 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
 
     def _on_llm_start(self, event_id: str, payload: Optional[Dict[str, Any]]) -> None:
         """Handle LLM start event."""
-        metadata: Dict[str, Any] = {"event_id": event_id, "user_id": self._user_id}
+        event_payload: Dict[str, Any] = {"event_id": event_id}
 
         if self._track_llm_inputs and payload:
             messages = payload.get(EventPayload.MESSAGES, [])
             if messages:
-                metadata["message_count"] = len(messages)
+                event_payload["message_count"] = len(messages)
 
         self._client.emit(
+            event_type="llm_start",
+            payload=event_payload,
             category="model_request",
-            action="llm_start",
-            success=True,
-            metadata=metadata,
+            user_id=self._user_id,
         )
 
     def _on_llm_end(
@@ -153,21 +181,26 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
                         input_tokens = getattr(usage, "prompt_tokens", 0)
                         output_tokens = getattr(usage, "completion_tokens", 0)
 
-        self._client.emit(
-            category="model_request",
-            action=model,
-            success=True,
-            model_usage=ModelUsage(
+        # Track usage for cost policies
+        if input_tokens or output_tokens:
+            self._client.track_usage(ModelUsage(
                 model=model,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 cost=cost,
-            ),
-            metadata={
+            ))
+
+        self._client.emit(
+            event_type="llm_end",
+            payload={
                 "event_id": event_id,
+                "model": model,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "duration_ms": duration_ms,
-                "user_id": self._user_id,
             },
+            category="model_request",
+            user_id=self._user_id,
         )
 
     def _on_embedding_start(
@@ -179,14 +212,13 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
             chunks = len(payload.get(EventPayload.CHUNKS, []))
 
         self._client.emit(
-            category="tool_call",
-            action="embedding_start",
-            success=True,
-            metadata={
+            event_type="embedding_start",
+            payload={
                 "event_id": event_id,
                 "chunks": chunks,
-                "user_id": self._user_id,
             },
+            category="tool_call",
+            user_id=self._user_id,
         )
 
     def _on_embedding_end(
@@ -197,14 +229,13 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
     ) -> None:
         """Handle embedding end event."""
         self._client.emit(
-            category="tool_call",
-            action="embedding",
-            success=True,
-            metadata={
+            event_type="embedding_end",
+            payload={
                 "event_id": event_id,
                 "duration_ms": duration_ms,
-                "user_id": self._user_id,
             },
+            category="tool_call",
+            user_id=self._user_id,
         )
 
     def _on_retrieval_start(
@@ -217,14 +248,13 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
             query = str(query_bundle)[:200]
 
         self._client.emit(
-            category="tool_call",
-            action="retrieval_start",
-            success=True,
-            metadata={
+            event_type="retrieval_start",
+            payload={
                 "event_id": event_id,
                 "query_preview": query,
-                "user_id": self._user_id,
             },
+            category="tool_call",
+            user_id=self._user_id,
         )
 
     def _on_retrieval_end(
@@ -240,15 +270,14 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
             node_count = len(nodes)
 
         self._client.emit(
-            category="tool_call",
-            action="retrieval",
-            success=True,
-            metadata={
+            event_type="retrieval_end",
+            payload={
                 "event_id": event_id,
                 "duration_ms": duration_ms,
                 "node_count": node_count,
-                "user_id": self._user_id,
             },
+            category="tool_call",
+            user_id=self._user_id,
         )
 
     def _on_query_start(
@@ -260,14 +289,13 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
             query = str(payload.get(EventPayload.QUERY_STR, ""))[:200]
 
         self._client.emit(
-            category="model_request",
-            action="query_start",
-            success=True,
-            metadata={
+            event_type="query_start",
+            payload={
                 "event_id": event_id,
                 "query_preview": query,
-                "user_id": self._user_id,
             },
+            category="model_request",
+            user_id=self._user_id,
         )
 
     def _on_query_end(
@@ -284,15 +312,14 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
                 response_length = len(str(response))
 
         self._client.emit(
-            category="model_request",
-            action="query_complete",
-            success=True,
-            metadata={
+            event_type="query_end",
+            payload={
                 "event_id": event_id,
                 "duration_ms": duration_ms,
                 "response_length": response_length,
-                "user_id": self._user_id,
             },
+            category="model_request",
+            user_id=self._user_id,
         )
 
     def _on_agent_step_start(
@@ -300,13 +327,12 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
     ) -> None:
         """Handle agent step start event."""
         self._client.emit(
-            category="task_execution",
-            action="agent_step_start",
-            success=True,
-            metadata={
+            event_type="agent_step_start",
+            payload={
                 "event_id": event_id,
-                "user_id": self._user_id,
             },
+            category="task_execution",
+            user_id=self._user_id,
         )
 
     def _on_agent_step_end(
@@ -317,14 +343,13 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
     ) -> None:
         """Handle agent step end event."""
         self._client.emit(
-            category="task_execution",
-            action="agent_step",
-            success=True,
-            metadata={
+            event_type="agent_step_end",
+            payload={
                 "event_id": event_id,
                 "duration_ms": duration_ms,
-                "user_id": self._user_id,
             },
+            category="task_execution",
+            user_id=self._user_id,
         )
 
     def start_trace(self, trace_id: Optional[str] = None) -> None:

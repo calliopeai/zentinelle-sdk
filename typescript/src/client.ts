@@ -76,11 +76,23 @@ export class ZentinelleClient {
     if (!options.apiKey || options.apiKey.length < 10) {
       throw new Error('apiKey is required and must be valid');
     }
+    // Validate API key format (should start with known prefixes)
+    const validPrefixes = ['sk_agent_', 'sk_test_', 'sk_live_', 'znt_'];
+    if (!validPrefixes.some(prefix => options.apiKey.startsWith(prefix))) {
+      console.warn(
+        '[Zentinelle] API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*). ' +
+        'This may indicate an invalid key.'
+      );
+    }
     if (!options.agentType) {
       throw new Error('agentType is required');
     }
 
     this.endpoint = (options.endpoint ?? 'https://api.zentinelle.ai').replace(/\/$/, '');
+    // Enforce HTTPS for security (API keys are transmitted in headers)
+    if (!this.endpoint.startsWith('https://')) {
+      throw new Error('endpoint must use HTTPS for security');
+    }
     this.apiKey = options.apiKey;
     this.agentType = options.agentType;
     this.agentId = options.agentId ?? null;
@@ -104,10 +116,14 @@ export class ZentinelleClient {
       this.flushTimer = setInterval(() => {
         if (this.registered) {
           this.flushEvents().catch((err) => {
-            console.warn('[Zentinelle] Background event flush failed:', err.message);
+            console.warn('[Zentinelle] Background event flush failed:', err?.message ?? String(err));
           });
         }
       }, interval);
+      // Unref timer to allow process to exit if this is the only thing keeping it alive
+      if (typeof this.flushTimer === 'object' && 'unref' in this.flushTimer) {
+        (this.flushTimer as NodeJS.Timeout).unref();
+      }
     }
 
     // Start auto-heartbeat if enabled
@@ -117,14 +133,18 @@ export class ZentinelleClient {
           this.heartbeat().then((result) => {
             if (result?.configChanged) {
               this.getConfig(true).catch((err) => {
-                console.warn('[Zentinelle] Background config refresh failed:', err.message);
+                console.warn('[Zentinelle] Background config refresh failed:', err?.message ?? String(err));
               });
             }
           }).catch((err) => {
-            console.debug('[Zentinelle] Background heartbeat failed:', err.message);
+            console.debug('[Zentinelle] Background heartbeat failed:', err?.message ?? String(err));
           });
         }
       }, this.heartbeatInterval);
+      // Unref timer to allow process to exit if this is the only thing keeping it alive
+      if (typeof this.heartbeatTimer === 'object' && 'unref' in this.heartbeatTimer) {
+        (this.heartbeatTimer as NodeJS.Timeout).unref();
+      }
     }
   }
 
@@ -186,10 +206,10 @@ export class ZentinelleClient {
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), this.timeout);
 
+      try {
         const response = await fetch(url, {
           method,
           headers: this.getHeaders(),
@@ -197,7 +217,6 @@ export class ZentinelleClient {
           signal: controller.signal,
         });
 
-        clearTimeout(timeoutId);
         const result = await this.handleResponse(response);
         this.circuitBreaker.recordSuccess();
         return result as T;
@@ -226,10 +245,17 @@ export class ZentinelleClient {
 
         const delay = this.retryConfig.getDelay(attempt);
         await new Promise((resolve) => setTimeout(resolve, delay));
+      } finally {
+        // Always clear timeout to prevent resource leak
+        clearTimeout(timeoutId);
       }
     }
 
-    throw lastError;
+    // This should be unreachable, but guard against edge cases
+    if (lastError) {
+      throw lastError;
+    }
+    throw new ZentinelleConnectionError(`Request to ${path} failed unexpectedly`);
   }
 
   private createFailOpenResponse<T>(isEvaluateRequest?: boolean): T {
@@ -350,7 +376,8 @@ export class ZentinelleClient {
   async getSecrets(forceRefresh = false): Promise<Record<string, string>> {
     if (!forceRefresh && this.secretsCache && this.secretsCacheTime) {
       if (Date.now() - this.secretsCacheTime.getTime() < this.secretsCacheTtl) {
-        return this.secretsCache;
+        // Return a copy to prevent external mutation
+        return { ...this.secretsCache };
       }
     }
 
@@ -361,7 +388,8 @@ export class ZentinelleClient {
     this.secretsCache = response.secrets;
     this.secretsCacheTime = new Date();
 
-    return response.secrets;
+    // Return a copy to prevent external mutation
+    return { ...response.secrets };
   }
 
   async getSecret(key: string, defaultValue?: string): Promise<string | undefined> {
@@ -543,9 +571,11 @@ export class ZentinelleClient {
         batchId: response.batch_id,
       };
     } catch (error) {
-      // Re-queue events on failure (check size after swap to avoid overflow)
-      if (this.eventBuffer.length + events.length < this.bufferSize * 2) {
+      // Re-queue events on failure (check against maxBufferSize to avoid overflow)
+      if (this.eventBuffer.length + events.length <= this.maxBufferSize) {
         this.eventBuffer = [...events, ...this.eventBuffer];
+      } else {
+        console.warn(`[Zentinelle] Failed to flush ${events.length} events and buffer is full, events dropped`);
       }
       return null;
     } finally {
@@ -601,7 +631,14 @@ export class ZentinelleClient {
       this.heartbeatTimer = null;
     }
 
+    // Flush remaining events
     await this.flushEvents();
+
+    // Clear sensitive data from memory
+    this.secretsCache = null;
+    this.secretsCacheTime = null;
+    this.configCache = null;
+    this.configCacheTime = null;
   }
 
   get isRegistered(): boolean {

@@ -37,6 +37,7 @@ func NewCircuitBreaker(threshold int, recoveryTimeout time.Duration) *CircuitBre
 }
 
 // CanExecute returns whether a call should be allowed.
+// In half-open state, limits the number of concurrent calls to halfOpenMaxCalls.
 func (cb *CircuitBreaker) CanExecute() bool {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
@@ -52,22 +53,31 @@ func (cb *CircuitBreaker) CanExecute() bool {
 		}
 		return false
 	case CircuitHalfOpen:
-		return true
+		// Limit concurrent calls in half-open state to prevent overwhelming recovering service
+		if cb.halfOpenCalls < cb.halfOpenMaxCalls {
+			cb.halfOpenCalls++
+			return true
+		}
+		return false
 	}
 	return false
 }
 
 // RecordSuccess records a successful call.
+// In half-open state, tracks successful calls. Once halfOpenMaxCalls successes
+// are recorded, the circuit transitions back to closed.
 func (cb *CircuitBreaker) RecordSuccess() {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
 	switch cb.state {
 	case CircuitHalfOpen:
-		cb.halfOpenCalls++
+		// halfOpenCalls is already incremented in CanExecute()
+		// Check if we've reached the threshold for recovery
 		if cb.halfOpenCalls >= cb.halfOpenMaxCalls {
 			cb.state = CircuitClosed
 			cb.failureCount = 0
+			cb.halfOpenCalls = 0
 		}
 	case CircuitClosed:
 		cb.failureCount = 0

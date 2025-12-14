@@ -2,6 +2,7 @@
 LangChain callback handler for Zentinelle observability.
 """
 import logging
+import time
 from typing import Any, Dict, List, Optional, Union
 from uuid import UUID
 
@@ -13,6 +14,11 @@ from langchain_core.messages import BaseMessage
 from zentinelle import ZentinelleClient, ModelUsage
 
 logger = logging.getLogger(__name__)
+
+# Maximum age for timing entries before cleanup (5 minutes)
+_MAX_TIMING_AGE_SECONDS = 300
+# Maximum number of timing entries before forced cleanup
+_MAX_TIMING_ENTRIES = 1000
 
 
 class ZentinelleCallbackHandler(BaseCallbackHandler):
@@ -71,8 +77,32 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
         self.track_prompts = track_prompts
         self.track_completions = track_completions
 
-        # Track timing
+        # Track timing with cleanup to prevent memory leaks
         self._start_times: Dict[UUID, float] = {}
+        self._last_cleanup_time = time.time()
+
+    def _cleanup_stale_timings(self) -> None:
+        """Remove stale timing entries to prevent memory leaks."""
+        now = time.time()
+
+        # Only cleanup if enough time has passed or buffer is too large
+        if (now - self._last_cleanup_time < 60 and
+                len(self._start_times) < _MAX_TIMING_ENTRIES):
+            return
+
+        self._last_cleanup_time = now
+        cutoff = now - _MAX_TIMING_AGE_SECONDS
+
+        # Remove entries older than cutoff
+        stale_ids = [
+            run_id for run_id, start_time in self._start_times.items()
+            if start_time < cutoff
+        ]
+        for run_id in stale_ids:
+            del self._start_times[run_id]
+
+        if stale_ids:
+            logger.debug(f"Cleaned up {len(stale_ids)} stale timing entries")
 
     def register(
         self,
@@ -161,7 +191,7 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Called when LLM starts running."""
-        import time
+        self._cleanup_stale_timings()
         self._start_times[run_id] = time.time()
 
         payload = {
@@ -188,7 +218,6 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Called when LLM ends running."""
-        import time
         duration_ms = None
         if run_id in self._start_times:
             duration_ms = int((time.time() - self._start_times.pop(run_id)) * 1000)
@@ -268,7 +297,7 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Called when chat model starts."""
-        import time
+        self._cleanup_stale_timings()
         self._start_times[run_id] = time.time()
 
         payload = {
@@ -301,7 +330,7 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Called when tool starts running."""
-        import time
+        self._cleanup_stale_timings()
         self._start_times[run_id] = time.time()
 
         tool_name = serialized.get('name', 'unknown')
@@ -325,7 +354,6 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Called when tool ends running."""
-        import time
         duration_ms = None
         if run_id in self._start_times:
             duration_ms = int((time.time() - self._start_times.pop(run_id)) * 1000)
@@ -377,7 +405,7 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Called when chain starts running."""
-        import time
+        self._cleanup_stale_timings()
         self._start_times[run_id] = time.time()
 
         chain_name = serialized.get('name', serialized.get('id', ['unknown'])[-1])
@@ -401,7 +429,6 @@ class ZentinelleCallbackHandler(BaseCallbackHandler):
         **kwargs: Any,
     ) -> None:
         """Called when chain ends running."""
-        import time
         duration_ms = None
         if run_id in self._start_times:
             duration_ms = int((time.time() - self._start_times.pop(run_id)) * 1000)

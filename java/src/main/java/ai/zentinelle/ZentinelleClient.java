@@ -81,8 +81,9 @@ public class ZentinelleClient implements AutoCloseable {
     private final ObjectMapper objectMapper;
     private final CircuitBreaker circuitBreaker;
 
-    private String agentId;
+    private volatile String agentId;  // Volatile for thread-safe reads
     private final AtomicBoolean registered = new AtomicBoolean(false);
+    private final Object registrationLock = new Object();  // Lock for atomic registration updates
     private final List<Event> eventBuffer = Collections.synchronizedList(new ArrayList<>());
     private final int maxBufferSize; // Maximum buffer size to prevent memory leaks
     private final ScheduledExecutorService scheduler;
@@ -93,8 +94,18 @@ public class ZentinelleClient implements AutoCloseable {
         if (this.apiKey.length() < 10) {
             throw new IllegalArgumentException("apiKey format is invalid");
         }
+        // Validate API key format (should start with known prefixes)
+        if (!this.apiKey.startsWith("sk_agent_") && !this.apiKey.startsWith("sk_test_") &&
+            !this.apiKey.startsWith("sk_live_") && !this.apiKey.startsWith("znt_")) {
+            log.warn("API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*). " +
+                "This may indicate an invalid key.");
+        }
         this.agentType = Objects.requireNonNull(builder.agentType, "agentType is required");
         this.endpoint = builder.endpoint != null ? builder.endpoint : DEFAULT_ENDPOINT;
+        // Enforce HTTPS for security (API keys are transmitted in headers)
+        if (!this.endpoint.startsWith("https://")) {
+            throw new IllegalArgumentException("endpoint must use HTTPS for security");
+        }
         this.orgId = builder.orgId;
         this.timeout = builder.timeout != null ? builder.timeout : DEFAULT_TIMEOUT;
         this.maxRetries = builder.maxRetries > 0 ? builder.maxRetries : DEFAULT_MAX_RETRIES;
@@ -160,8 +171,11 @@ public class ZentinelleClient implements AutoCloseable {
 
         Map<String, Object> response = request("POST", "/agents/register", body);
 
-        this.agentId = (String) response.get("agent_id");
-        this.registered.set(true);
+        // Atomically update agentId and registered flag to prevent race conditions
+        synchronized (registrationLock) {
+            this.agentId = (String) response.get("agent_id");
+            this.registered.set(true);
+        }
 
         log.info("Registered agent: {}", agentId);
 
@@ -193,11 +207,17 @@ public class ZentinelleClient implements AutoCloseable {
         // Check for fail-open response
         boolean isFailOpen = Boolean.TRUE.equals(response.get("fail_open"));
 
-        // Critical: validate that 'allowed' field is present (unless fail-open)
+        // Critical: validate that 'allowed' field is present and is a Boolean (unless fail-open)
         // Never default to true - this would bypass security
         Object allowedObj = response.get("allowed");
-        if (!isFailOpen && allowedObj == null) {
-            throw new ZentinelleException("Invalid response: missing required 'allowed' field");
+        if (!isFailOpen) {
+            if (allowedObj == null) {
+                throw new ZentinelleException("Invalid response: missing required 'allowed' field");
+            }
+            if (!(allowedObj instanceof Boolean)) {
+                throw new ZentinelleException("Invalid response: 'allowed' field must be a boolean, got: " +
+                    (allowedObj == null ? "null" : allowedObj.getClass().getSimpleName()));
+            }
         }
 
         boolean allowed = isFailOpen ? true : (Boolean) allowedObj;
@@ -264,7 +284,6 @@ public class ZentinelleClient implements AutoCloseable {
             .userId(options.getUserId())
             .build();
 
-        boolean shouldFlush;
         synchronized (eventBuffer) {
             // Enforce max buffer size to prevent memory leaks
             if (eventBuffer.size() >= maxBufferSize) {
@@ -275,12 +294,10 @@ public class ZentinelleClient implements AutoCloseable {
                 log.warn("Event buffer at max capacity, dropped {} oldest events", dropped);
             }
             eventBuffer.add(event);
-            shouldFlush = eventBuffer.size() >= bufferSize;
         }
-
-        if (shouldFlush) {
-            flushEventsAsync();
-        }
+        // Note: Flushing is handled by the scheduled executor to avoid race conditions.
+        // We don't call flushEventsAsync() here since it could cause concurrent flushes
+        // with the scheduled task. The scheduled task runs every flushInterval.
     }
 
     /**
@@ -320,10 +337,12 @@ public class ZentinelleClient implements AutoCloseable {
             ));
             log.debug("Flushed {} events", events.size());
         } catch (ZentinelleException e) {
-            // Re-queue events on failure
+            // Re-queue events on failure (check against maxBufferSize to avoid overflow)
             synchronized (eventBuffer) {
-                if (eventBuffer.size() < bufferSize * 2) {
+                if (eventBuffer.size() + events.size() <= maxBufferSize) {
                     eventBuffer.addAll(0, events);
+                } else {
+                    log.warn("Failed to flush {} events and buffer is full, events dropped", events.size());
                 }
             }
             throw e;
@@ -557,7 +576,19 @@ public class ZentinelleClient implements AutoCloseable {
 
     @SuppressWarnings("unchecked")
     private List<String> castToStringList(Object obj) {
-        return obj instanceof List ? (List<String>) obj : List.of();
+        if (!(obj instanceof List)) {
+            return List.of();
+        }
+        List<?> list = (List<?>) obj;
+        List<String> result = new ArrayList<>(list.size());
+        for (Object item : list) {
+            if (item instanceof String) {
+                result.add((String) item);
+            } else if (item != null) {
+                result.add(String.valueOf(item));
+            }
+        }
+        return result;
     }
 
     @SuppressWarnings("unchecked")
@@ -578,12 +609,27 @@ public class ZentinelleClient implements AutoCloseable {
     private List<PolicyEvaluation> parsePolicyEvaluations(Object obj) {
         if (!(obj instanceof List)) return List.of();
         return ((List<Map<String, Object>>) obj).stream()
-            .map(m -> PolicyEvaluation.builder()
-                .name((String) m.get("name"))
-                .type((String) m.get("type"))
-                .passed((Boolean) m.getOrDefault("passed", true))
-                .message((String) m.get("message"))
-                .build())
+            .map(m -> {
+                // Security: never default 'passed' to true - require explicit value
+                Object passedObj = m.get("passed");
+                boolean passed;
+                if (passedObj instanceof Boolean) {
+                    passed = (Boolean) passedObj;
+                } else if (passedObj == null) {
+                    // Missing 'passed' field - default to false for security
+                    passed = false;
+                    log.warn("Policy evaluation missing 'passed' field, defaulting to false");
+                } else {
+                    passed = false;
+                    log.warn("Policy evaluation 'passed' field is not a boolean, defaulting to false");
+                }
+                return PolicyEvaluation.builder()
+                    .name((String) m.get("name"))
+                    .type((String) m.get("type"))
+                    .passed(passed)
+                    .message((String) m.get("message"))
+                    .build();
+            })
             .toList();
     }
 

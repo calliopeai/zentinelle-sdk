@@ -37,6 +37,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
@@ -99,12 +100,29 @@ func NewClient(config Config) (*Client, error) {
 	if len(config.APIKey) < 10 {
 		return nil, fmt.Errorf("APIKey format is invalid")
 	}
+	// Validate API key format (should start with known prefixes)
+	validPrefixes := []string{"sk_agent_", "sk_test_", "sk_live_", "znt_"}
+	hasValidPrefix := false
+	for _, prefix := range validPrefixes {
+		if strings.HasPrefix(config.APIKey, prefix) {
+			hasValidPrefix = true
+			break
+		}
+	}
+	if !hasValidPrefix {
+		log.Printf("[Zentinelle] API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*). This may indicate an invalid key.")
+	}
 	if config.AgentType == "" {
 		return nil, fmt.Errorf("AgentType is required")
 	}
 
 	if config.Endpoint == "" {
 		config.Endpoint = DefaultEndpoint
+	}
+
+	// Enforce HTTPS for security (API keys are transmitted in headers)
+	if !strings.HasPrefix(config.Endpoint, "https://") {
+		return nil, fmt.Errorf("endpoint must use HTTPS for security")
 	}
 	if config.Timeout == 0 {
 		config.Timeout = DefaultTimeout
@@ -368,8 +386,13 @@ type PolicyEvaluation struct {
 
 // Evaluate evaluates policies for an action.
 func (c *Client) Evaluate(ctx context.Context, action string, opts EvaluateOptions) (*EvaluateResult, error) {
+	// Get agentID under lock to prevent data race
+	c.stateMu.RLock()
+	agentID := c.agentID
+	c.stateMu.RUnlock()
+
 	body := map[string]interface{}{
-		"agent_id": c.agentID,
+		"agent_id": agentID,
 		"action":   action,
 		"user_id":  opts.UserID,
 		"context":  opts.Context,
@@ -447,8 +470,17 @@ func (c *Client) GetSecretsWithRefresh(ctx context.Context, forceRefresh bool) (
 		c.secretsCacheMu.RUnlock()
 	}
 
+	// Get agentID under lock to prevent data race
+	c.stateMu.RLock()
+	agentID := c.agentID
+	c.stateMu.RUnlock()
+
+	if agentID == "" {
+		return nil, fmt.Errorf("agent not registered")
+	}
+
 	// Fetch fresh secrets
-	resp, err := c.request(ctx, http.MethodGet, "/agents/"+c.agentID+"/secrets", nil)
+	resp, err := c.request(ctx, http.MethodGet, "/agents/"+agentID+"/secrets", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -460,13 +492,18 @@ func (c *Client) GetSecretsWithRefresh(ctx context.Context, forceRefresh bool) (
 		return nil, err
 	}
 
-	// Update cache
+	// Update cache and return a copy to prevent caller modification corrupting cache
 	c.secretsCacheMu.Lock()
 	c.secretsCache = result.Secrets
 	c.secretsCacheTime = time.Now()
+	// Return a copy to prevent modification
+	secrets := make(map[string]string, len(c.secretsCache))
+	for k, v := range c.secretsCache {
+		secrets[k] = v
+	}
 	c.secretsCacheMu.Unlock()
 
-	return result.Secrets, nil
+	return secrets, nil
 }
 
 // TrackUsage tracks model usage for cost policies.
@@ -506,20 +543,13 @@ func (c *Client) Emit(eventType string, payload map[string]interface{}, opts Emi
 	if len(c.eventBuffer) >= c.maxBufferSize {
 		dropped := len(c.eventBuffer) - c.maxBufferSize + 1
 		c.eventBuffer = c.eventBuffer[dropped:]
-		// Log warning about dropped events (using fmt since no logger configured)
-		fmt.Printf("[Zentinelle] Event buffer at max capacity, dropped %d oldest events\n", dropped)
+		log.Printf("[Zentinelle] Event buffer at max capacity, dropped %d oldest events", dropped)
 	}
 	c.eventBuffer = append(c.eventBuffer, event)
-	shouldFlush := len(c.eventBuffer) >= c.config.BufferSize
 	c.bufferMu.Unlock()
 
-	if shouldFlush {
-		go func() {
-			if err := c.FlushEvents(context.Background()); err != nil {
-				log.Printf("[Zentinelle] Background event flush failed: %v", err)
-			}
-		}()
-	}
+	// Note: Flushing is handled by the background flushLoop goroutine.
+	// We don't spawn additional goroutines here to avoid goroutine leaks.
 }
 
 // EmitToolCall emits a tool call event.
@@ -552,10 +582,12 @@ func (c *Client) FlushEvents(ctx context.Context) error {
 
 	_, err := c.request(ctx, http.MethodPost, "/events", body)
 	if err != nil {
-		// Re-queue events on failure
+		// Re-queue events on failure (check against maxBufferSize to avoid overflow)
 		c.bufferMu.Lock()
-		if len(c.eventBuffer) < c.config.BufferSize*2 {
+		if len(c.eventBuffer)+len(events) <= c.maxBufferSize {
 			c.eventBuffer = append(events, c.eventBuffer...)
+		} else {
+			log.Printf("[Zentinelle] Failed to flush %d events and buffer is full, events dropped", len(events))
 		}
 		c.bufferMu.Unlock()
 		return err

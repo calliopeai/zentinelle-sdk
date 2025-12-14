@@ -252,11 +252,21 @@ class ZentinelleClient:
         """
         # Validate required parameters
         if not api_key or len(api_key) < 10:
-            raise ValueError("api_key is required and must be valid")
+            raise ValueError("api_key is required and must be at least 10 characters")
+        # Validate API key format (should start with sk_agent_ or similar prefix)
+        valid_prefixes = ('sk_agent_', 'sk_test_', 'sk_live_', 'znt_')
+        if not any(api_key.startswith(prefix) for prefix in valid_prefixes):
+            logger.warning(
+                "API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*). "
+                "This may indicate an invalid key."
+            )
         if not agent_type:
             raise ValueError("agent_type is required")
 
         self.endpoint = (endpoint or self.DEFAULT_ENDPOINT).rstrip('/')
+        # Enforce HTTPS for security (API keys are transmitted in headers)
+        if not self.endpoint.startswith('https://'):
+            raise ValueError("endpoint must use HTTPS for security")
         self.api_key = api_key
         self.agent_type = agent_type
         self.agent_id = agent_id
@@ -278,11 +288,12 @@ class ZentinelleClient:
         self._config_cache_ttl = timedelta(seconds=config_cache_ttl)
         self._secrets_cache_ttl = timedelta(seconds=secrets_cache_ttl)
 
-        # Caches
+        # Caches (protected by _cache_lock for thread safety)
         self._config_cache: Optional[Dict] = None
         self._config_cache_time: Optional[datetime] = None
         self._secrets_cache: Optional[Dict] = None
         self._secrets_cache_time: Optional[datetime] = None
+        self._cache_lock = threading.Lock()
 
         # Event buffer
         self._event_buffer: List[Dict] = []
@@ -362,7 +373,7 @@ class ZentinelleClient:
             )
 
         url = f"{self.endpoint}/api/v1{path}"
-        last_exception = None
+        last_exception: Optional[Exception] = None
 
         for attempt in range(self._retry_config.max_retries + 1):
             try:
@@ -399,7 +410,10 @@ class ZentinelleClient:
                 )
                 time.sleep(delay)
 
-        raise last_exception
+        # This should be unreachable, but guard against edge cases
+        if last_exception:
+            raise last_exception
+        raise ZentinelleConnectionError(f"Request to {path} failed unexpectedly")
 
     def _post(self, path: str, data: Dict, is_evaluate: bool = False) -> Dict:
         """Make POST request with retry logic."""
@@ -414,7 +428,7 @@ class ZentinelleClient:
             )
 
         url = f"{self.endpoint}/api/v1{path}"
-        last_exception = None
+        last_exception: Optional[Exception] = None
 
         for attempt in range(self._retry_config.max_retries + 1):
             try:
@@ -454,7 +468,10 @@ class ZentinelleClient:
                 )
                 time.sleep(delay)
 
-        raise last_exception
+        # This should be unreachable, but guard against edge cases
+        if last_exception:
+            raise last_exception
+        raise ZentinelleConnectionError(f"Request to {path} failed unexpectedly")
 
     def _post_for_evaluate(self, path: str, data: Dict) -> Dict:
         """Make POST request for evaluate endpoint with proper fail-open handling."""
@@ -525,19 +542,22 @@ class ZentinelleClient:
         Returns:
             ConfigResult with config and policies
         """
-        if not force_refresh and self._config_cache and self._config_cache_time:
-            if datetime.now(timezone.utc) - self._config_cache_time < self._config_cache_ttl:
-                return ConfigResult(
-                    agent_id=self.agent_id,
-                    config=self._config_cache,
-                    policies=[],
-                    updated_at=self._config_cache_time,
-                )
+        # Thread-safe cache check
+        with self._cache_lock:
+            if not force_refresh and self._config_cache and self._config_cache_time:
+                if datetime.now(timezone.utc) - self._config_cache_time < self._config_cache_ttl:
+                    return ConfigResult(
+                        agent_id=self.agent_id,
+                        config=self._config_cache.copy(),  # Return copy to prevent mutation
+                        policies=[],
+                        updated_at=self._config_cache_time,
+                    )
 
         response = self._get(f'/agents/{self.agent_id}/config')
 
-        self._config_cache = response.get('config', {})
-        self._config_cache_time = datetime.now(timezone.utc)
+        with self._cache_lock:
+            self._config_cache = response.get('config', {})
+            self._config_cache_time = datetime.now(timezone.utc)
 
         policies = [
             PolicyConfig(**p) for p in response.get('policies', [])
@@ -574,18 +594,20 @@ class ZentinelleClient:
             force_refresh: Bypass cache and fetch fresh secrets
 
         Returns:
-            Dictionary of secret name -> value
+            Dictionary of secret name -> value (copy to prevent mutation)
         """
-        if not force_refresh and self._secrets_cache and self._secrets_cache_time:
-            if datetime.now(timezone.utc) - self._secrets_cache_time < self._secrets_cache_ttl:
-                return self._secrets_cache
+        # Thread-safe cache check
+        with self._cache_lock:
+            if not force_refresh and self._secrets_cache and self._secrets_cache_time:
+                if datetime.now(timezone.utc) - self._secrets_cache_time < self._secrets_cache_ttl:
+                    return self._secrets_cache.copy()  # Return copy to prevent mutation
 
         response = self._get(f'/agents/{self.agent_id}/secrets')
 
-        self._secrets_cache = response.get('secrets', {})
-        self._secrets_cache_time = datetime.now(timezone.utc)
-
-        return self._secrets_cache
+        with self._cache_lock:
+            self._secrets_cache = response.get('secrets', {})
+            self._secrets_cache_time = datetime.now(timezone.utc)
+            return self._secrets_cache.copy()  # Return copy to prevent mutation
 
     def get_secret(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Get a single secret value."""
@@ -771,8 +793,10 @@ class ZentinelleClient:
         except Exception as e:
             logger.warning(f"Failed to flush events: {e}")
             # Re-queue events on failure (lock already held by caller)
-            if len(self._event_buffer) < self._event_buffer_size * 2:
+            if len(self._event_buffer) + len(events) <= self._max_buffer_size:
                 self._event_buffer = events + self._event_buffer
+            else:
+                logger.warning(f"Failed to flush {len(events)} events and buffer is full, events dropped")
             return None
 
     def _flush_loop(self) -> None:
@@ -834,19 +858,41 @@ class ZentinelleClient:
     # Lifecycle
     # =========================================================================
 
-    def shutdown(self) -> None:
-        """Graceful shutdown: stop threads and flush remaining events."""
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """
+        Graceful shutdown: stop threads and flush remaining events.
+
+        Args:
+            timeout: Maximum time to wait for threads to finish (seconds)
+        """
         logger.info("Shutting down Zentinelle client")
         self._running = False
 
+        # Flush remaining events
         with self._buffer_lock:
             self._flush_events_sync()
 
+        # Wait for background threads to finish
+        if self._flush_thread and self._flush_thread.is_alive():
+            self._flush_thread.join(timeout=timeout)
+            if self._flush_thread.is_alive():
+                logger.warning("Flush thread did not terminate within timeout")
+
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            self._heartbeat_thread.join(timeout=timeout)
+            if self._heartbeat_thread.is_alive():
+                logger.warning("Heartbeat thread did not terminate within timeout")
+
         # Clear sensitive data from memory
-        self._secrets_cache = None
-        self._secrets_cache_time = None
-        self._config_cache = None
-        self._config_cache_time = None
+        with self._cache_lock:
+            self._secrets_cache = None
+            self._secrets_cache_time = None
+            self._config_cache = None
+            self._config_cache_time = None
+
+        # Clear API key (note: Python strings are immutable, so we can only remove reference)
+        self.api_key = ""
+        self.org_id = None
 
     def __repr__(self) -> str:
         """Return string representation with masked sensitive fields."""

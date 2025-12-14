@@ -3,10 +3,13 @@ package ai.zentinelle;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Circuit breaker for failing fast when service is down.
+ *
+ * Uses a lock-based approach for correct half-open state semantics:
+ * - Tracks successful calls in half-open state (not just allowed calls)
+ * - Prevents race conditions between concurrent requests
  */
 class CircuitBreaker {
 
@@ -16,10 +19,12 @@ class CircuitBreaker {
     private final Duration recoveryTimeout;
     private final int halfOpenMaxCalls;
 
-    private final AtomicReference<State> state = new AtomicReference<>(State.CLOSED);
-    private final AtomicInteger failureCount = new AtomicInteger(0);
-    private final AtomicInteger halfOpenCalls = new AtomicInteger(0);
-    private volatile Instant lastFailureTime;
+    private State state = State.CLOSED;
+    private int failureCount = 0;
+    private int halfOpenSuccesses = 0;  // Track successful calls, not just allowed
+    private final AtomicInteger halfOpenInFlight = new AtomicInteger(0);  // Currently executing calls
+    private Instant lastFailureTime;
+    private final Object lock = new Object();
 
     CircuitBreaker(int failureThreshold, Duration recoveryTimeout) {
         this.failureThreshold = failureThreshold;
@@ -28,50 +33,84 @@ class CircuitBreaker {
     }
 
     boolean canExecute() {
-        State current = state.get();
+        synchronized (lock) {
+            switch (state) {
+                case CLOSED:
+                    return true;
 
-        if (current == State.CLOSED) {
-            return true;
-        }
+                case OPEN:
+                    if (lastFailureTime != null &&
+                        Duration.between(lastFailureTime, Instant.now()).compareTo(recoveryTimeout) > 0) {
+                        // Transition to half-open
+                        state = State.HALF_OPEN;
+                        halfOpenSuccesses = 0;
+                        halfOpenInFlight.set(0);
+                        // Allow this call
+                        halfOpenInFlight.incrementAndGet();
+                        return true;
+                    }
+                    return false;
 
-        if (current == State.OPEN) {
-            if (lastFailureTime != null &&
-                Duration.between(lastFailureTime, Instant.now()).compareTo(recoveryTimeout) > 0) {
-                if (state.compareAndSet(State.OPEN, State.HALF_OPEN)) {
-                    halfOpenCalls.set(0);
-                }
-                return true;
+                case HALF_OPEN:
+                    // Limit concurrent calls in half-open state
+                    if (halfOpenInFlight.get() < halfOpenMaxCalls) {
+                        halfOpenInFlight.incrementAndGet();
+                        return true;
+                    }
+                    return false;
+
+                default:
+                    return false;
             }
-            return false;
         }
-
-        // HALF_OPEN
-        return true;
     }
 
     void recordSuccess() {
-        State current = state.get();
+        synchronized (lock) {
+            switch (state) {
+                case HALF_OPEN:
+                    halfOpenInFlight.decrementAndGet();
+                    halfOpenSuccesses++;
+                    // Close circuit after N successful calls
+                    if (halfOpenSuccesses >= halfOpenMaxCalls) {
+                        state = State.CLOSED;
+                        failureCount = 0;
+                        halfOpenSuccesses = 0;
+                    }
+                    break;
 
-        if (current == State.HALF_OPEN) {
-            if (halfOpenCalls.incrementAndGet() >= halfOpenMaxCalls) {
-                state.set(State.CLOSED);
-                failureCount.set(0);
+                case CLOSED:
+                    // Reset failure count on success
+                    failureCount = 0;
+                    break;
+
+                default:
+                    break;
             }
-        } else if (current == State.CLOSED) {
-            failureCount.set(0);
         }
     }
 
     void recordFailure() {
-        failureCount.incrementAndGet();
-        lastFailureTime = Instant.now();
+        synchronized (lock) {
+            failureCount++;
+            lastFailureTime = Instant.now();
 
-        State current = state.get();
+            switch (state) {
+                case HALF_OPEN:
+                    halfOpenInFlight.decrementAndGet();
+                    // Any failure in half-open goes back to open
+                    state = State.OPEN;
+                    break;
 
-        if (current == State.HALF_OPEN) {
-            state.set(State.OPEN);
-        } else if (failureCount.get() >= failureThreshold) {
-            state.set(State.OPEN);
+                case CLOSED:
+                    if (failureCount >= failureThreshold) {
+                        state = State.OPEN;
+                    }
+                    break;
+
+                default:
+                    break;
+            }
         }
     }
 }

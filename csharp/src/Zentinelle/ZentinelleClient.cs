@@ -17,6 +17,7 @@ namespace Zentinelle;
 public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
 {
     private readonly HttpClient _httpClient;
+    private readonly bool _ownsHttpClient;  // Track if we own the HttpClient (should dispose) or if it was injected
     private readonly ZentinelleOptions _options;
     private readonly ILogger<ZentinelleClient> _logger;
     private readonly CircuitBreaker _circuitBreaker;
@@ -26,10 +27,11 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
     private readonly Timer _heartbeatTimer;
     private readonly SemaphoreSlim _flushLock = new(1, 1);
     private readonly CancellationTokenSource _cts = new();
+    private readonly object _configCacheLock = new();  // Lock for config cache thread safety
 
     private PolicyConfig? _cachedConfig;
     private DateTime _configCacheTime;
-    private volatile bool _disposed;
+    private int _disposed;  // 0 = not disposed, 1 = disposed (using int for Interlocked)
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -56,6 +58,15 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
             throw new ArgumentException("ApiKey is required and must be valid", nameof(options));
         }
 
+        // Validate API key format (should start with known prefixes)
+        var validPrefixes = new[] { "sk_agent_", "sk_test_", "sk_live_", "znt_" };
+        if (!validPrefixes.Any(prefix => options.ApiKey.StartsWith(prefix, StringComparison.Ordinal)))
+        {
+            _logger?.LogWarning(
+                "API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*). " +
+                "This may indicate an invalid key.");
+        }
+
         if (string.IsNullOrWhiteSpace(options.AgentId))
         {
             throw new ArgumentException("AgentId is required", nameof(options));
@@ -66,14 +77,37 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
             throw new ArgumentException("AgentType is required", nameof(options));
         }
 
+        // Enforce HTTPS for security (API keys are transmitted in headers)
+        if (!options.BaseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException("BaseUrl must use HTTPS for security", nameof(options));
+        }
+
         _logger = logger ?? NullLogger<ZentinelleClient>.Instance;
 
+        // Track whether we own the HttpClient (and should dispose it) or if it was injected
+        _ownsHttpClient = httpClient == null;
         _httpClient = httpClient ?? new HttpClient();
-        _httpClient.BaseAddress = new Uri(options.BaseUrl);
-        _httpClient.DefaultRequestHeaders.Add("X-Zentinelle-Key", options.ApiKey);
-        _httpClient.DefaultRequestHeaders.Add("User-Agent", "zentinelle-csharp/0.1.0");
-        _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        _httpClient.Timeout = options.Timeout;
+
+        // Only modify headers if we own the HttpClient, or if it hasn't been configured
+        if (_ownsHttpClient)
+        {
+            _httpClient.BaseAddress = new Uri(options.BaseUrl);
+            _httpClient.DefaultRequestHeaders.Add("X-Zentinelle-Key", options.ApiKey);
+            _httpClient.DefaultRequestHeaders.Add("User-Agent", "zentinelle-csharp/0.1.0");
+            _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            _httpClient.Timeout = options.Timeout;
+        }
+        else
+        {
+            // For injected HttpClient, only set headers that aren't already set
+            if (_httpClient.BaseAddress == null)
+                _httpClient.BaseAddress = new Uri(options.BaseUrl);
+            if (!_httpClient.DefaultRequestHeaders.Contains("X-Zentinelle-Key"))
+                _httpClient.DefaultRequestHeaders.Add("X-Zentinelle-Key", options.ApiKey);
+            if (!_httpClient.DefaultRequestHeaders.Contains("User-Agent"))
+                _httpClient.DefaultRequestHeaders.Add("User-Agent", "zentinelle-csharp/0.1.0");
+        }
 
         _circuitBreaker = new CircuitBreaker(
             options.CircuitBreakerThreshold,
@@ -98,7 +132,7 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
 
     private async void SafeFlushEventsAsync()
     {
-        if (_disposed || _cts.Token.IsCancellationRequested) return;
+        if (Volatile.Read(ref _disposed) != 0 || _cts.Token.IsCancellationRequested) return;
 
         try
         {
@@ -116,7 +150,7 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
 
     private async void SafeSendHeartbeatAsync()
     {
-        if (_disposed || _cts.Token.IsCancellationRequested) return;
+        if (Volatile.Read(ref _disposed) != 0 || _cts.Token.IsCancellationRequested) return;
 
         try
         {
@@ -227,10 +261,14 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         evt.AgentId ??= _options.AgentId;
 
         // Enforce max buffer size to prevent memory leaks
-        if (_eventBuffer.Count >= _maxBufferSize)
+        // Use a snapshot of count and drop a fixed number to avoid race conditions
+        var currentCount = _eventBuffer.Count;
+        if (currentCount >= _maxBufferSize)
         {
+            // Drop enough events to make room, plus a small buffer to reduce frequency of drops
+            var toDrop = Math.Max(1, currentCount - _maxBufferSize + 10);
             var dropped = 0;
-            while (_eventBuffer.Count >= _maxBufferSize && _eventBuffer.TryDequeue(out _))
+            for (var i = 0; i < toDrop && _eventBuffer.TryDequeue(out _); i++)
             {
                 dropped++;
             }
@@ -265,11 +303,15 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         bool forceRefresh = false,
         CancellationToken cancellationToken = default)
     {
-        if (!forceRefresh &&
-            _cachedConfig != null &&
-            DateTime.UtcNow - _configCacheTime < _options.ConfigCacheDuration)
+        // Thread-safe cache check
+        lock (_configCacheLock)
         {
-            return _cachedConfig;
+            if (!forceRefresh &&
+                _cachedConfig != null &&
+                DateTime.UtcNow - _configCacheTime < _options.ConfigCacheDuration)
+            {
+                return _cachedConfig;
+            }
         }
 
         var response = await SendRequestAsync<PolicyConfig>(
@@ -278,8 +320,11 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
             null,
             cancellationToken).ConfigureAwait(false);
 
-        _cachedConfig = response;
-        _configCacheTime = DateTime.UtcNow;
+        lock (_configCacheLock)
+        {
+            _cachedConfig = response;
+            _configCacheTime = DateTime.UtcNow;
+        }
         return response;
     }
 
@@ -497,25 +542,33 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
     /// <inheritdoc />
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
+        // Atomically check and set disposed flag to prevent double-dispose race
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
-        _cts.Cancel();
+        // Stop timers first (before cancellation)
         _flushTimer.Dispose();
         _heartbeatTimer.Dispose();
 
-        // Synchronous flush - use Task.Run to avoid deadlock in sync contexts
+        // Perform final flush with a fresh cancellation token and timeout
+        // Don't use _cts as we want to allow the flush to complete
         try
         {
-            Task.Run(async () => await FlushEventsAsync().ConfigureAwait(false))
-                .GetAwaiter().GetResult();
+            using var flushCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            FlushEventsAsync(flushCts.Token).GetAwaiter().GetResult();
         }
         catch (Exception)
         {
             // Ignore flush errors during disposal
         }
 
-        _httpClient.Dispose();
+        // Now cancel any remaining operations
+        _cts.Cancel();
+
+        // Only dispose HttpClient if we created it (not if it was injected)
+        if (_ownsHttpClient)
+        {
+            _httpClient.Dispose();
+        }
         _flushLock.Dispose();
         _cts.Dispose();
     }
@@ -523,23 +576,33 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        _disposed = true;
+        // Atomically check and set disposed flag to prevent double-dispose race
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
-        _cts.Cancel();
+        // Stop timers first (before cancellation)
         await _flushTimer.DisposeAsync().ConfigureAwait(false);
         await _heartbeatTimer.DisposeAsync().ConfigureAwait(false);
 
+        // Perform final flush with a fresh cancellation token and timeout
+        // Don't use _cts as we want to allow the flush to complete
         try
         {
-            await FlushEventsAsync().ConfigureAwait(false);
+            using var flushCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            await FlushEventsAsync(flushCts.Token).ConfigureAwait(false);
         }
         catch (Exception)
         {
             // Ignore flush errors during disposal
         }
 
-        _httpClient.Dispose();
+        // Now cancel any remaining operations
+        _cts.Cancel();
+
+        // Only dispose HttpClient if we created it (not if it was injected)
+        if (_ownsHttpClient)
+        {
+            _httpClient.Dispose();
+        }
         _flushLock.Dispose();
         _cts.Dispose();
     }
