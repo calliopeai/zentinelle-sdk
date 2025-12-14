@@ -143,6 +143,40 @@ class TestCircuitBreaker:
         # (implementation detail: depends on how half_open_calls is tracked)
 
 
+class TestZentinelleClientRepr:
+    """Tests for ZentinelleClient string representation."""
+
+    def test_repr_masks_api_key(self):
+        """API key should be masked in __repr__."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_secret_key_12345",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            repr_str = repr(client)
+            # Should not contain full API key
+            assert "sk_agent_secret_key_12345" not in repr_str
+            # Should contain masked version
+            assert "sk_agent..." in repr_str
+            assert "...2345" in repr_str
+            client._running = False
+
+    def test_repr_shows_agent_info(self):
+        """Repr should show agent_id and agent_type."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test_key_123",
+                agent_type="langchain",
+                agent_id="agent-123",
+                auto_heartbeat=False,
+            )
+            repr_str = repr(client)
+            assert "agent_id='agent-123'" in repr_str
+            assert "agent_type='langchain'" in repr_str
+            client._running = False
+
+
 class TestZentinelleClientInit:
     """Tests for ZentinelleClient initialization."""
 
