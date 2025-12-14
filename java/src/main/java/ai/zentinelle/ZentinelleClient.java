@@ -84,11 +84,15 @@ public class ZentinelleClient implements AutoCloseable {
     private String agentId;
     private final AtomicBoolean registered = new AtomicBoolean(false);
     private final List<Event> eventBuffer = Collections.synchronizedList(new ArrayList<>());
+    private final int maxBufferSize; // Maximum buffer size to prevent memory leaks
     private final ScheduledExecutorService scheduler;
     private volatile boolean shutdown = false;
 
     private ZentinelleClient(Builder builder) {
         this.apiKey = Objects.requireNonNull(builder.apiKey, "apiKey is required");
+        if (this.apiKey.length() < 10) {
+            throw new IllegalArgumentException("apiKey format is invalid");
+        }
         this.agentType = Objects.requireNonNull(builder.agentType, "agentType is required");
         this.endpoint = builder.endpoint != null ? builder.endpoint : DEFAULT_ENDPOINT;
         this.orgId = builder.orgId;
@@ -96,6 +100,8 @@ public class ZentinelleClient implements AutoCloseable {
         this.maxRetries = builder.maxRetries > 0 ? builder.maxRetries : DEFAULT_MAX_RETRIES;
         this.failOpen = builder.failOpen;
         this.bufferSize = builder.bufferSize > 0 ? builder.bufferSize : DEFAULT_BUFFER_SIZE;
+        // Maximum buffer size to prevent memory leaks (10x normal or 1000, whichever is larger)
+        this.maxBufferSize = Math.max(this.bufferSize * 10, 1000);
         this.agentId = builder.agentId;
 
         this.httpClient = new OkHttpClient.Builder()
@@ -182,14 +188,27 @@ public class ZentinelleClient implements AutoCloseable {
         body.put("user_id", options.getUserId());
         body.put("context", options.getContext());
 
-        Map<String, Object> response = request("POST", "/evaluate", body);
+        Map<String, Object> response = requestForEvaluate("POST", "/evaluate", body);
+
+        // Check for fail-open response
+        boolean isFailOpen = Boolean.TRUE.equals(response.get("fail_open"));
+
+        // Critical: validate that 'allowed' field is present (unless fail-open)
+        // Never default to true - this would bypass security
+        Object allowedObj = response.get("allowed");
+        if (!isFailOpen && allowedObj == null) {
+            throw new ZentinelleException("Invalid response: missing required 'allowed' field");
+        }
+
+        boolean allowed = isFailOpen ? true : (Boolean) allowedObj;
 
         return EvaluateResult.builder()
-            .allowed((Boolean) response.getOrDefault("allowed", true))
+            .allowed(allowed)
             .reason((String) response.get("reason"))
             .policiesEvaluated(parsePolicyEvaluations(response.get("policies_evaluated")))
             .warnings(castToStringList(response.get("warnings")))
             .context(castToMap(response.get("context")))
+            .failOpen(isFailOpen)
             .build();
     }
 
@@ -245,9 +264,21 @@ public class ZentinelleClient implements AutoCloseable {
             .userId(options.getUserId())
             .build();
 
-        eventBuffer.add(event);
+        boolean shouldFlush;
+        synchronized (eventBuffer) {
+            // Enforce max buffer size to prevent memory leaks
+            if (eventBuffer.size() >= maxBufferSize) {
+                int dropped = eventBuffer.size() - maxBufferSize + 1;
+                for (int i = 0; i < dropped; i++) {
+                    eventBuffer.remove(0);
+                }
+                log.warn("Event buffer at max capacity, dropped {} oldest events", dropped);
+            }
+            eventBuffer.add(event);
+            shouldFlush = eventBuffer.size() >= bufferSize;
+        }
 
-        if (eventBuffer.size() >= bufferSize) {
+        if (shouldFlush) {
             flushEventsAsync();
         }
     }
@@ -269,12 +300,15 @@ public class ZentinelleClient implements AutoCloseable {
      * Flushes buffered events.
      */
     public void flushEvents() throws ZentinelleException {
-        if (eventBuffer.isEmpty() || agentId == null) {
+        if (agentId == null) {
             return;
         }
 
         List<Event> events;
         synchronized (eventBuffer) {
+            if (eventBuffer.isEmpty()) {
+                return;
+            }
             events = new ArrayList<>(eventBuffer);
             eventBuffer.clear();
         }
@@ -334,6 +368,17 @@ public class ZentinelleClient implements AutoCloseable {
         } catch (Exception e) {
             log.warn("Failed to flush events during shutdown: {}", e.getMessage());
         }
+
+        // Properly close OkHttpClient resources
+        httpClient.dispatcher().executorService().shutdown();
+        httpClient.connectionPool().evictAll();
+        if (httpClient.cache() != null) {
+            try {
+                httpClient.cache().close();
+            } catch (IOException e) {
+                log.debug("Failed to close HTTP cache: {}", e.getMessage());
+            }
+        }
     }
 
     @Override
@@ -355,13 +400,47 @@ public class ZentinelleClient implements AutoCloseable {
         return registered.get();
     }
 
+    // HTTP request handling for evaluate (with proper fail-open response)
+    private Map<String, Object> requestForEvaluate(String method, String path, Map<String, Object> body)
+            throws ZentinelleException {
+
+        if (!circuitBreaker.canExecute()) {
+            if (failOpen) {
+                log.warn("Circuit breaker OPEN, failing open for evaluate request");
+                return createFailOpenEvaluateResponse();
+            }
+            throw new ConnectionException("Circuit breaker is open");
+        }
+
+        try {
+            return request(method, path, body);
+        } catch (ConnectionException e) {
+            if (failOpen) {
+                log.warn("Request failed, failing open: {}", e.getMessage());
+                return createFailOpenEvaluateResponse();
+            }
+            throw e;
+        }
+    }
+
+    private Map<String, Object> createFailOpenEvaluateResponse() {
+        return Map.of(
+            "allowed", true,
+            "reason", "fail_open",
+            "fail_open", true,
+            "warnings", List.of("Service unavailable - fail-open mode active"),
+            "policies_evaluated", List.of(),
+            "context", Map.of()
+        );
+    }
+
     // HTTP request handling
     private Map<String, Object> request(String method, String path, Map<String, Object> body)
             throws ZentinelleException {
 
         if (!circuitBreaker.canExecute()) {
             if (failOpen) {
-                return Map.of();
+                return Map.of("fail_open", true);
             }
             throw new ConnectionException("Circuit breaker is open");
         }

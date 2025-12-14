@@ -2,7 +2,6 @@
 Governed tools for CrewAI agents.
 """
 
-import functools
 import time
 from typing import Any, Callable, Optional, TypeVar
 
@@ -192,7 +191,9 @@ def governed_tool(
             risk_level="low"
         )
         def calculate(expression: str) -> float:
-            return eval(expression)  # Simple example
+            # WARNING: Use a safe math parser in production, never eval()
+            import ast
+            return ast.literal_eval(expression)  # Only evaluates literals
 
         # Use in agent
         agent = Agent(tools=[calculate], ...)

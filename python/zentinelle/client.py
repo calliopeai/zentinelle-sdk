@@ -7,7 +7,7 @@ import logging
 import random
 import requests
 from typing import List, Dict, Any, Optional, Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import wraps
 
 from .types import (
@@ -246,7 +246,16 @@ class ZentinelleClient:
             circuit_breaker_threshold: Number of failures before opening circuit
             circuit_breaker_recovery: Seconds to wait before testing recovery
             fail_open: If True, allow actions when Zentinelle is unreachable
+
+        Raises:
+            ValueError: If api_key or agent_type is invalid
         """
+        # Validate required parameters
+        if not api_key or len(api_key) < 10:
+            raise ValueError("api_key is required and must be valid")
+        if not agent_type:
+            raise ValueError("agent_type is required")
+
         self.endpoint = (endpoint or self.DEFAULT_ENDPOINT).rstrip('/')
         self.api_key = api_key
         self.agent_type = agent_type
@@ -278,6 +287,8 @@ class ZentinelleClient:
         # Event buffer
         self._event_buffer: List[Dict] = []
         self._buffer_lock = threading.Lock()
+        # Maximum buffer size to prevent memory leaks (10x normal or 1000, whichever is larger)
+        self._max_buffer_size = max(event_buffer_size * 10, 1000)
 
         # Background threads
         self._running = True
@@ -379,7 +390,7 @@ class ZentinelleClient:
                     if self.fail_open:
                         logger.warning(f"Failed after {attempt + 1} attempts, failing open")
                         return {}
-                    raise ZentinelleConnectionError(f"Failed after {attempt + 1} attempts: {e}")
+                    raise ZentinelleConnectionError(f"Failed after {attempt + 1} attempts: {e}") from e
 
                 delay = self._retry_config.get_delay(attempt)
                 logger.warning(
@@ -390,12 +401,14 @@ class ZentinelleClient:
 
         raise last_exception
 
-    def _post(self, path: str, data: Dict) -> Dict:
+    def _post(self, path: str, data: Dict, is_evaluate: bool = False) -> Dict:
         """Make POST request with retry logic."""
         if not self._circuit_breaker.can_execute():
             if self.fail_open:
                 logger.warning("Circuit breaker OPEN, failing open")
-                return {'allowed': True, 'reason': 'fail_open'}
+                if is_evaluate:
+                    return {'allowed': True, 'reason': 'fail_open', 'fail_open': True}
+                return {}
             raise ZentinelleConnectionError(
                 "Circuit breaker is OPEN - Zentinelle service appears to be down"
             )
@@ -429,8 +442,10 @@ class ZentinelleClient:
                 if attempt >= self._retry_config.max_retries:
                     if self.fail_open:
                         logger.warning(f"Failed after {attempt + 1} attempts, failing open")
-                        return {'allowed': True, 'reason': 'fail_open'}
-                    raise ZentinelleConnectionError(f"Failed after {attempt + 1} attempts: {e}")
+                        if is_evaluate:
+                            return {'allowed': True, 'reason': 'fail_open', 'fail_open': True}
+                        return {}
+                    raise ZentinelleConnectionError(f"Failed after {attempt + 1} attempts: {e}") from e
 
                 delay = self._retry_config.get_delay(attempt)
                 logger.warning(
@@ -440,6 +455,10 @@ class ZentinelleClient:
                 time.sleep(delay)
 
         raise last_exception
+
+    def _post_for_evaluate(self, path: str, data: Dict) -> Dict:
+        """Make POST request for evaluate endpoint with proper fail-open handling."""
+        return self._post(path, data, is_evaluate=True)
 
     # =========================================================================
     # Registration
@@ -474,7 +493,7 @@ class ZentinelleClient:
         self._registered = True
 
         self._config_cache = response.get('config', {})
-        self._config_cache_time = datetime.utcnow()
+        self._config_cache_time = datetime.now(timezone.utc)
 
         if response.get('api_key'):
             self.api_key = response['api_key']
@@ -507,7 +526,7 @@ class ZentinelleClient:
             ConfigResult with config and policies
         """
         if not force_refresh and self._config_cache and self._config_cache_time:
-            if datetime.utcnow() - self._config_cache_time < self._config_cache_ttl:
+            if datetime.now(timezone.utc) - self._config_cache_time < self._config_cache_ttl:
                 return ConfigResult(
                     agent_id=self.agent_id,
                     config=self._config_cache,
@@ -518,7 +537,7 @@ class ZentinelleClient:
         response = self._get(f'/agents/{self.agent_id}/config')
 
         self._config_cache = response.get('config', {})
-        self._config_cache_time = datetime.utcnow()
+        self._config_cache_time = datetime.now(timezone.utc)
 
         policies = [
             PolicyConfig(**p) for p in response.get('policies', [])
@@ -529,7 +548,7 @@ class ZentinelleClient:
             config=response.get('config', {}),
             policies=policies,
             updated_at=datetime.fromisoformat(
-                response.get('updated_at', datetime.utcnow().isoformat()).replace('Z', '+00:00')
+                response.get('updated_at', datetime.now(timezone.utc).isoformat()).replace('Z', '+00:00')
             ),
         )
 
@@ -558,13 +577,13 @@ class ZentinelleClient:
             Dictionary of secret name -> value
         """
         if not force_refresh and self._secrets_cache and self._secrets_cache_time:
-            if datetime.utcnow() - self._secrets_cache_time < self._secrets_cache_ttl:
+            if datetime.now(timezone.utc) - self._secrets_cache_time < self._secrets_cache_ttl:
                 return self._secrets_cache
 
         response = self._get(f'/agents/{self.agent_id}/secrets')
 
         self._secrets_cache = response.get('secrets', {})
-        self._secrets_cache_time = datetime.utcnow()
+        self._secrets_cache_time = datetime.now(timezone.utc)
 
         return self._secrets_cache
 
@@ -594,19 +613,28 @@ class ZentinelleClient:
         Returns:
             EvaluateResult with allowed status and details
         """
-        response = self._post('/evaluate', {
+        response = self._post_for_evaluate('/evaluate', {
             'agent_id': self.agent_id,
             'action': action,
             'user_id': user_id or '',
             'context': context or {},
         })
 
+        # Check for fail-open response
+        is_fail_open = response.get('fail_open', False)
+
+        # Critical: validate that 'allowed' field is present (unless fail-open)
+        # Never default to True - this would bypass security
+        if not is_fail_open and 'allowed' not in response:
+            raise ZentinelleError("Invalid response: missing required 'allowed' field")
+
         return EvaluateResult(
-            allowed=response.get('allowed', True),
+            allowed=response.get('allowed', True) if is_fail_open else response['allowed'],
             reason=response.get('reason'),
             policies_evaluated=response.get('policies_evaluated', []),
             warnings=response.get('warnings', []),
             context=response.get('context', {}),
+            fail_open=is_fail_open,
         )
 
     def can_use_model(self, model: str, provider: str = 'openai') -> EvaluateResult:
@@ -667,11 +695,17 @@ class ZentinelleClient:
             'type': event_type,
             'category': category,
             'payload': payload or {},
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'timestamp': datetime.now(timezone.utc).isoformat() + 'Z',
             'user_id': user_id or '',
         }
 
         with self._buffer_lock:
+            # Enforce max buffer size to prevent memory leaks
+            if len(self._event_buffer) >= self._max_buffer_size:
+                dropped = len(self._event_buffer) - self._max_buffer_size + 1
+                self._event_buffer = self._event_buffer[dropped:]
+                logger.warning(f"Event buffer at max capacity, dropped {dropped} oldest events")
+
             self._event_buffer.append(event)
 
             if len(self._event_buffer) >= self._event_buffer_size:
@@ -736,9 +770,9 @@ class ZentinelleClient:
             )
         except Exception as e:
             logger.warning(f"Failed to flush events: {e}")
-            with self._buffer_lock:
-                if len(self._event_buffer) < self._event_buffer_size * 2:
-                    self._event_buffer = events + self._event_buffer
+            # Re-queue events on failure (lock already held by caller)
+            if len(self._event_buffer) < self._event_buffer_size * 2:
+                self._event_buffer = events + self._event_buffer
             return None
 
     def _flush_loop(self) -> None:
@@ -807,6 +841,22 @@ class ZentinelleClient:
 
         with self._buffer_lock:
             self._flush_events_sync()
+
+        # Clear sensitive data from memory
+        self._secrets_cache = None
+        self._secrets_cache_time = None
+        self._config_cache = None
+        self._config_cache_time = None
+
+    def __repr__(self) -> str:
+        """Return string representation with masked sensitive fields."""
+        masked_key = f"{self.api_key[:8]}...{self.api_key[-4:]}" if len(self.api_key) > 12 else "***"
+        return (
+            f"ZentinelleClient(agent_id={self.agent_id!r}, "
+            f"agent_type={self.agent_type!r}, "
+            f"endpoint={self.endpoint!r}, "
+            f"api_key={masked_key!r})"
+        )
 
     def __enter__(self):
         return self

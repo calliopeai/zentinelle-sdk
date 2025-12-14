@@ -35,6 +35,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -61,6 +62,8 @@ type Config struct {
 	FlushInterval           time.Duration
 	CircuitBreakerThreshold int
 	CircuitBreakerTimeout   time.Duration
+	SecretsCacheTTL         time.Duration // TTL for secrets cache (default: 60s)
+	ConfigCacheTTL          time.Duration // TTL for config cache (default: 300s)
 }
 
 // Client is the Zentinelle SDK client.
@@ -70,16 +73,31 @@ type Client struct {
 	agentID        string
 	registered     bool
 	eventBuffer    []Event
+	maxBufferSize  int // Maximum buffer size to prevent memory leaks
 	bufferMu       sync.Mutex
+	stateMu        sync.RWMutex // Protects agentID and registered
 	circuitBreaker *CircuitBreaker
 	stopCh         chan struct{}
+	stopOnce       sync.Once // Ensures Shutdown only runs once
 	wg             sync.WaitGroup
+
+	// Caches
+	secretsCache     map[string]string
+	secretsCacheTime time.Time
+	secretsCacheMu   sync.RWMutex
+	configCache      map[string]interface{}
+	configCacheTime  time.Time
+	configCacheMu    sync.RWMutex
 }
 
 // NewClient creates a new Zentinelle client.
 func NewClient(config Config) (*Client, error) {
 	if config.APIKey == "" {
 		return nil, fmt.Errorf("APIKey is required")
+	}
+	// Validate API key format (should start with sk_agent_)
+	if len(config.APIKey) < 10 {
+		return nil, fmt.Errorf("APIKey format is invalid")
 	}
 	if config.AgentType == "" {
 		return nil, fmt.Errorf("AgentType is required")
@@ -106,6 +124,18 @@ func NewClient(config Config) (*Client, error) {
 	if config.CircuitBreakerTimeout == 0 {
 		config.CircuitBreakerTimeout = 30 * time.Second
 	}
+	if config.SecretsCacheTTL == 0 {
+		config.SecretsCacheTTL = 60 * time.Second
+	}
+	if config.ConfigCacheTTL == 0 {
+		config.ConfigCacheTTL = 300 * time.Second
+	}
+
+	// Calculate max buffer size (10x normal or 1000, whichever is larger)
+	maxBufferSize := config.BufferSize * 10
+	if maxBufferSize < 1000 {
+		maxBufferSize = 1000
+	}
 
 	c := &Client{
 		config: config,
@@ -114,6 +144,7 @@ func NewClient(config Config) (*Client, error) {
 		},
 		agentID:        config.AgentID,
 		eventBuffer:    make([]Event, 0, config.BufferSize),
+		maxBufferSize:  maxBufferSize,
 		circuitBreaker: NewCircuitBreaker(config.CircuitBreakerThreshold, config.CircuitBreakerTimeout),
 		stopCh:         make(chan struct{}),
 	}
@@ -134,8 +165,13 @@ func (c *Client) flushLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			if c.registered {
-				_ = c.FlushEvents(context.Background())
+			c.stateMu.RLock()
+			registered := c.registered
+			c.stateMu.RUnlock()
+			if registered {
+				if err := c.FlushEvents(context.Background()); err != nil {
+					log.Printf("[Zentinelle] Background event flush failed: %v", err)
+				}
 			}
 		case <-c.stopCh:
 			return
@@ -152,19 +188,26 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 		return nil, &ConnectionError{Message: "circuit breaker is open"}
 	}
 
-	var bodyReader io.Reader
+	// Marshal body once and reuse for retries
+	var bodyData []byte
 	if body != nil {
-		data, err := json.Marshal(body)
+		var err error
+		bodyData, err = json.Marshal(body)
 		if err != nil {
 			return nil, err
 		}
-		bodyReader = bytes.NewReader(data)
 	}
 
 	url := c.config.Endpoint + "/api/v1" + path
 
 	var lastErr error
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
+		// Create a fresh reader for each attempt to avoid EOF issues
+		var bodyReader io.Reader
+		if bodyData != nil {
+			bodyReader = bytes.NewReader(bodyData)
+		}
+
 		req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 		if err != nil {
 			return nil, err
@@ -187,9 +230,9 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 			}
 			break
 		}
-		defer resp.Body.Close()
 
 		respBody, err := io.ReadAll(resp.Body)
+		resp.Body.Close() // Close immediately, not defer (avoid leak in retry loop)
 		if err != nil {
 			lastErr = err
 			continue
@@ -275,8 +318,10 @@ func (c *Client) Register(ctx context.Context, opts RegisterOptions) (*RegisterR
 		return nil, err
 	}
 
+	c.stateMu.Lock()
 	c.agentID = result.AgentID
 	c.registered = true
+	c.stateMu.Unlock()
 
 	policies := make([]PolicyConfig, len(result.Policies))
 	for i, p := range result.Policies {
@@ -310,6 +355,7 @@ type EvaluateResult struct {
 	PoliciesEvaluated []PolicyEvaluation
 	Warnings          []string
 	Context           map[string]interface{}
+	FailOpen          bool // True if result was returned due to fail-open mode
 }
 
 // PolicyEvaluation holds the result of a single policy evaluation.
@@ -381,6 +427,27 @@ func (c *Client) CanUseModel(ctx context.Context, model, provider string) (*Eval
 
 // GetSecrets retrieves secrets for the agent.
 func (c *Client) GetSecrets(ctx context.Context) (map[string]string, error) {
+	return c.GetSecretsWithRefresh(ctx, false)
+}
+
+// GetSecretsWithRefresh retrieves secrets with optional cache bypass.
+func (c *Client) GetSecretsWithRefresh(ctx context.Context, forceRefresh bool) (map[string]string, error) {
+	// Check cache first
+	if !forceRefresh {
+		c.secretsCacheMu.RLock()
+		if c.secretsCache != nil && time.Since(c.secretsCacheTime) < c.config.SecretsCacheTTL {
+			// Return a copy to prevent modification
+			secrets := make(map[string]string, len(c.secretsCache))
+			for k, v := range c.secretsCache {
+				secrets[k] = v
+			}
+			c.secretsCacheMu.RUnlock()
+			return secrets, nil
+		}
+		c.secretsCacheMu.RUnlock()
+	}
+
+	// Fetch fresh secrets
 	resp, err := c.request(ctx, http.MethodGet, "/agents/"+c.agentID+"/secrets", nil)
 	if err != nil {
 		return nil, err
@@ -392,6 +459,12 @@ func (c *Client) GetSecrets(ctx context.Context) (map[string]string, error) {
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return nil, err
 	}
+
+	// Update cache
+	c.secretsCacheMu.Lock()
+	c.secretsCache = result.Secrets
+	c.secretsCacheTime = time.Now()
+	c.secretsCacheMu.Unlock()
 
 	return result.Secrets, nil
 }
@@ -429,13 +502,22 @@ func (c *Client) Emit(eventType string, payload map[string]interface{}, opts Emi
 	}
 
 	c.bufferMu.Lock()
+	// Enforce max buffer size to prevent memory leaks
+	if len(c.eventBuffer) >= c.maxBufferSize {
+		dropped := len(c.eventBuffer) - c.maxBufferSize + 1
+		c.eventBuffer = c.eventBuffer[dropped:]
+		// Log warning about dropped events (using fmt since no logger configured)
+		fmt.Printf("[Zentinelle] Event buffer at max capacity, dropped %d oldest events\n", dropped)
+	}
 	c.eventBuffer = append(c.eventBuffer, event)
 	shouldFlush := len(c.eventBuffer) >= c.config.BufferSize
 	c.bufferMu.Unlock()
 
 	if shouldFlush {
 		go func() {
-			_ = c.FlushEvents(context.Background())
+			if err := c.FlushEvents(context.Background()); err != nil {
+				log.Printf("[Zentinelle] Background event flush failed: %v", err)
+			}
 		}()
 	}
 }
@@ -450,8 +532,12 @@ func (c *Client) EmitToolCall(toolName string, userID string, durationMs int64) 
 
 // FlushEvents flushes buffered events.
 func (c *Client) FlushEvents(ctx context.Context) error {
+	c.stateMu.RLock()
+	agentID := c.agentID
+	c.stateMu.RUnlock()
+
 	c.bufferMu.Lock()
-	if len(c.eventBuffer) == 0 || c.agentID == "" {
+	if len(c.eventBuffer) == 0 || agentID == "" {
 		c.bufferMu.Unlock()
 		return nil
 	}
@@ -460,7 +546,7 @@ func (c *Client) FlushEvents(ctx context.Context) error {
 	c.bufferMu.Unlock()
 
 	body := map[string]interface{}{
-		"agent_id": c.agentID,
+		"agent_id": agentID,
 		"events":   events,
 	}
 
@@ -480,12 +566,17 @@ func (c *Client) FlushEvents(ctx context.Context) error {
 
 // Heartbeat sends a heartbeat.
 func (c *Client) Heartbeat(ctx context.Context, status string, metrics map[string]interface{}) error {
-	if !c.registered || c.agentID == "" {
+	c.stateMu.RLock()
+	registered := c.registered
+	agentID := c.agentID
+	c.stateMu.RUnlock()
+
+	if !registered || agentID == "" {
 		return nil
 	}
 
 	body := map[string]interface{}{
-		"agent_id": c.agentID,
+		"agent_id": agentID,
 		"status":   status,
 		"metrics":  metrics,
 	}
@@ -495,19 +586,31 @@ func (c *Client) Heartbeat(ctx context.Context, status string, metrics map[strin
 }
 
 // Shutdown gracefully shuts down the client.
+// Safe to call multiple times.
 func (c *Client) Shutdown() {
-	close(c.stopCh)
-	c.wg.Wait()
-	_ = c.FlushEvents(context.Background())
+	c.stopOnce.Do(func() {
+		close(c.stopCh)
+		c.wg.Wait()
+		// Final flush with timeout to avoid hanging
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := c.FlushEvents(ctx); err != nil {
+			log.Printf("[Zentinelle] Failed to flush events during shutdown: %v", err)
+		}
+	})
 }
 
 // AgentID returns the current agent ID.
 func (c *Client) AgentID() string {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
 	return c.agentID
 }
 
 // IsRegistered returns whether the agent is registered.
 func (c *Client) IsRegistered() bool {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
 	return c.registered
 }
 

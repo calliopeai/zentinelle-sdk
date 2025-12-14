@@ -1,16 +1,16 @@
 """
-Tests for SentinelClient.
+Tests for ZentinelleClient.
 """
 import pytest
 from unittest.mock import Mock, patch
 import time
 
-from sentinel_sdk import (
-    SentinelClient,
-    SentinelError,
-    SentinelConnectionError,
-    SentinelAuthError,
-    SentinelRateLimitError,
+from zentinelle import (
+    ZentinelleClient,
+    ZentinelleError,
+    ZentinelleConnectionError,
+    ZentinelleAuthError,
+    ZentinelleRateLimitError,
     RetryConfig,
     CircuitBreaker,
 )
@@ -125,84 +125,84 @@ class TestCircuitBreaker:
         assert cb.state == CircuitBreaker.OPEN
 
 
-class TestSentinelClientInit:
-    """Tests for SentinelClient initialization."""
+class TestZentinelleClientInit:
+    """Tests for ZentinelleClient initialization."""
 
     def test_basic_init(self):
-        with patch.object(SentinelClient, '_flush_loop'):
-            client = SentinelClient(
-                endpoint="https://sentinel.example.com",
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                endpoint="https://api.zentinelle.ai",
                 api_key="sk_agent_test",
                 agent_type="test",
                 auto_heartbeat=False,
             )
-            assert client.endpoint == "https://sentinel.example.com"
+            assert client.endpoint == "https://api.zentinelle.ai"
             assert client.api_key == "sk_agent_test"
             assert client.agent_type == "test"
             client._running = False
 
     def test_strips_trailing_slash(self):
-        with patch.object(SentinelClient, '_flush_loop'):
-            client = SentinelClient(
-                endpoint="https://sentinel.example.com/",
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                endpoint="https://api.zentinelle.ai/",
                 api_key="sk_agent_test",
                 agent_type="test",
                 auto_heartbeat=False,
             )
-            assert client.endpoint == "https://sentinel.example.com"
+            assert client.endpoint == "https://api.zentinelle.ai"
             client._running = False
 
 
-class TestSentinelClientHeaders:
+class TestZentinelleClientHeaders:
     """Tests for header generation."""
 
     def test_headers_with_api_key(self):
-        with patch.object(SentinelClient, '_flush_loop'):
-            client = SentinelClient(
-                endpoint="https://sentinel.example.com",
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                endpoint="https://api.zentinelle.ai",
                 api_key="sk_agent_test",
                 agent_type="test",
                 auto_heartbeat=False,
             )
             headers = client._headers()
-            assert headers['X-Sentinel-Key'] == "sk_agent_test"
+            assert headers['X-Zentinelle-Key'] == "sk_agent_test"
             assert headers['Content-Type'] == "application/json"
             client._running = False
 
     def test_headers_with_org_id(self):
-        with patch.object(SentinelClient, '_flush_loop'):
-            client = SentinelClient(
-                endpoint="https://sentinel.example.com",
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                endpoint="https://api.zentinelle.ai",
                 api_key="sk_agent_test",
                 agent_type="test",
                 org_id="org-123",
                 auto_heartbeat=False,
             )
             headers = client._headers()
-            assert headers['X-Sentinel-Org'] == "org-123"
+            assert headers['X-Zentinelle-Org'] == "org-123"
             client._running = False
 
 
-class TestSentinelExceptions:
+class TestZentinelleExceptions:
     """Tests for exception classes."""
 
     def test_base_exception(self):
-        with pytest.raises(SentinelError):
-            raise SentinelError("test error")
+        with pytest.raises(ZentinelleError):
+            raise ZentinelleError("test error")
 
     def test_connection_error(self):
-        with pytest.raises(SentinelConnectionError):
-            raise SentinelConnectionError("connection failed")
+        with pytest.raises(ZentinelleConnectionError):
+            raise ZentinelleConnectionError("connection failed")
 
     def test_auth_error(self):
-        with pytest.raises(SentinelAuthError):
-            raise SentinelAuthError("invalid key")
+        with pytest.raises(ZentinelleAuthError):
+            raise ZentinelleAuthError("invalid key")
 
     def test_rate_limit_error(self):
-        error = SentinelRateLimitError("rate limited", retry_after=30)
+        error = ZentinelleRateLimitError("rate limited", retry_after=30)
         assert error.retry_after == 30
 
     def test_exception_hierarchy(self):
-        assert issubclass(SentinelConnectionError, SentinelError)
-        assert issubclass(SentinelAuthError, SentinelError)
-        assert issubclass(SentinelRateLimitError, SentinelError)
+        assert issubclass(ZentinelleConnectionError, ZentinelleError)
+        assert issubclass(ZentinelleAuthError, ZentinelleError)
+        assert issubclass(ZentinelleRateLimitError, ZentinelleError)

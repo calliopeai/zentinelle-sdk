@@ -35,6 +35,10 @@ export interface ZentinelleClientOptions {
   autoFlush?: boolean;
   flushInterval?: number;
   bufferSize?: number;
+  /** Enable automatic heartbeats (default: true) */
+  autoHeartbeat?: boolean;
+  /** Interval between heartbeats in milliseconds (default: 60000) */
+  heartbeatInterval?: number;
 }
 
 export class ZentinelleClient {
@@ -51,7 +55,11 @@ export class ZentinelleClient {
 
   private eventBuffer: Event[] = [];
   private readonly bufferSize: number;
+  private readonly maxBufferSize: number;
   private flushTimer: ReturnType<typeof setInterval> | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly heartbeatInterval: number;
+  private flushInProgress = false;
 
   private configCache: Record<string, unknown> | null = null;
   private configCacheTime: Date | null = null;
@@ -64,6 +72,14 @@ export class ZentinelleClient {
   private registered = false;
 
   constructor(options: ZentinelleClientOptions) {
+    // Validate required parameters
+    if (!options.apiKey || options.apiKey.length < 10) {
+      throw new Error('apiKey is required and must be valid');
+    }
+    if (!options.agentType) {
+      throw new Error('agentType is required');
+    }
+
     this.endpoint = (options.endpoint ?? 'https://api.zentinelle.ai').replace(/\/$/, '');
     this.apiKey = options.apiKey;
     this.agentType = options.agentType;
@@ -72,21 +88,43 @@ export class ZentinelleClient {
     this.timeout = options.timeout ?? 30000;
     this.failOpen = options.failOpen ?? false;
     this.bufferSize = options.bufferSize ?? 100;
+    // Maximum buffer size to prevent memory leaks (10x normal or 1000, whichever is larger)
+    this.maxBufferSize = Math.max(this.bufferSize * 10, 1000);
 
     this.retryConfig = options.retryConfig ?? new RetryConfig();
     this.circuitBreaker = new CircuitBreaker({
       failureThreshold: options.circuitBreakerThreshold ?? 5,
       recoveryTimeout: options.circuitBreakerRecovery ?? 30000,
     });
+    this.heartbeatInterval = options.heartbeatInterval ?? 60000;
 
     // Start auto-flush if enabled
     if (options.autoFlush !== false) {
       const interval = options.flushInterval ?? 5000;
       this.flushTimer = setInterval(() => {
         if (this.registered) {
-          this.flushEvents().catch(() => {});
+          this.flushEvents().catch((err) => {
+            console.warn('[Zentinelle] Background event flush failed:', err.message);
+          });
         }
       }, interval);
+    }
+
+    // Start auto-heartbeat if enabled
+    if (options.autoHeartbeat !== false) {
+      this.heartbeatTimer = setInterval(() => {
+        if (this.registered) {
+          this.heartbeat().then((result) => {
+            if (result?.configChanged) {
+              this.getConfig(true).catch((err) => {
+                console.warn('[Zentinelle] Background config refresh failed:', err.message);
+              });
+            }
+          }).catch((err) => {
+            console.debug('[Zentinelle] Background heartbeat failed:', err.message);
+          });
+        }
+      }, this.heartbeatInterval);
     }
   }
 
@@ -133,11 +171,13 @@ export class ZentinelleClient {
   private async request<T>(
     method: 'GET' | 'POST',
     path: string,
-    body?: unknown
+    body?: unknown,
+    options?: { isEvaluateRequest?: boolean }
   ): Promise<T> {
     if (!this.circuitBreaker.canExecute()) {
       if (this.failOpen) {
-        return {} as T;
+        console.warn('[Zentinelle] Circuit breaker OPEN, failing open');
+        return this.createFailOpenResponse<T>(options?.isEvaluateRequest);
       }
       throw new ZentinelleConnectionError('Circuit breaker is OPEN');
     }
@@ -176,7 +216,8 @@ export class ZentinelleClient {
 
         if (attempt >= this.retryConfig.maxRetries) {
           if (this.failOpen) {
-            return {} as T;
+            console.warn(`[Zentinelle] Request failed after ${attempt + 1} attempts, failing open: ${lastError.message}`);
+            return this.createFailOpenResponse<T>(options?.isEvaluateRequest);
           }
           throw new ZentinelleConnectionError(
             `Failed after ${attempt + 1} attempts: ${lastError.message}`
@@ -189,6 +230,22 @@ export class ZentinelleClient {
     }
 
     throw lastError;
+  }
+
+  private createFailOpenResponse<T>(isEvaluateRequest?: boolean): T {
+    if (isEvaluateRequest) {
+      // Return a properly marked fail-open response for evaluate requests
+      return {
+        allowed: true,
+        reason: 'fail_open',
+        fail_open: true,
+        policies_evaluated: [],
+        warnings: ['Service unavailable - fail-open mode active'],
+        context: {},
+      } as unknown as T;
+    }
+    // For other requests, return empty object (caller should handle)
+    return { fail_open: true } as T;
   }
 
   // ===========================================================================
@@ -334,19 +391,27 @@ export class ZentinelleClient {
       }>;
       warnings?: string[];
       context?: Record<string, unknown>;
+      fail_open?: boolean;
     }>('POST', '/evaluate', {
       agent_id: this.agentId,
       action,
       user_id: options.userId ?? '',
       context: options.context ?? {},
-    });
+    }, { isEvaluateRequest: true });
+
+    // Critical: validate that 'allowed' field is present (unless fail-open)
+    // Never default to true - this would bypass security
+    if (!response.fail_open && (response.allowed === undefined || response.allowed === null)) {
+      throw new ZentinelleError('Invalid response: missing required "allowed" field');
+    }
 
     return {
-      allowed: response.allowed ?? true,
+      allowed: response.allowed,
       reason: response.reason,
       policiesEvaluated: response.policies_evaluated ?? [],
       warnings: response.warnings ?? [],
       context: response.context ?? {},
+      failOpen: response.fail_open ?? false,
     };
   }
 
@@ -396,6 +461,13 @@ export class ZentinelleClient {
       timestamp: new Date().toISOString(),
       userId: options.userId,
     };
+
+    // Enforce max buffer size to prevent memory leaks
+    if (this.eventBuffer.length >= this.maxBufferSize) {
+      const dropped = this.eventBuffer.length - this.maxBufferSize + 1;
+      this.eventBuffer = this.eventBuffer.slice(dropped);
+      console.warn(`[Zentinelle] Event buffer at max capacity, dropped ${dropped} oldest events`);
+    }
 
     this.eventBuffer.push(event);
 
@@ -447,6 +519,13 @@ export class ZentinelleClient {
       return null;
     }
 
+    // Prevent concurrent flushes
+    if (this.flushInProgress) {
+      return null;
+    }
+    this.flushInProgress = true;
+
+    // Atomically swap buffer
     const events = this.eventBuffer;
     this.eventBuffer = [];
 
@@ -464,11 +543,13 @@ export class ZentinelleClient {
         batchId: response.batch_id,
       };
     } catch (error) {
-      // Re-queue events on failure
-      if (this.eventBuffer.length < this.bufferSize * 2) {
+      // Re-queue events on failure (check size after swap to avoid overflow)
+      if (this.eventBuffer.length + events.length < this.bufferSize * 2) {
         this.eventBuffer = [...events, ...this.eventBuffer];
       }
       return null;
+    } finally {
+      this.flushInProgress = false;
     }
   }
 
@@ -513,6 +594,11 @@ export class ZentinelleClient {
     if (this.flushTimer) {
       clearInterval(this.flushTimer);
       this.flushTimer = null;
+    }
+
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
     }
 
     await this.flushEvents();

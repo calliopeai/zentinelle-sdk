@@ -1,6 +1,7 @@
 """
 LangChain Runnable wrapper for full chain governance.
 """
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Iterator, AsyncIterator
 
@@ -152,8 +153,8 @@ class ZentinelleRunnable(Runnable):
         config: Optional[RunnableConfig] = None,
     ) -> Any:
         """Async invoke with governance."""
-        # For now, delegate to sync (client is sync)
-        return self.invoke(input, config)
+        # Run sync client operations in thread pool to avoid blocking event loop
+        return await asyncio.to_thread(self.invoke, input, config)
 
     def stream(
         self,
@@ -188,7 +189,9 @@ class ZentinelleRunnable(Runnable):
         user_id = context.pop('user_id', None)
 
         if self.evaluate_input:
-            result = self.client.evaluate(
+            # Run sync policy evaluation in thread pool to avoid blocking event loop
+            result = await asyncio.to_thread(
+                self.client.evaluate,
                 action='runnable_input',
                 user_id=user_id,
                 context=context,

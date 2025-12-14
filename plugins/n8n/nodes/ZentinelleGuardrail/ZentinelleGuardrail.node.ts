@@ -107,7 +107,12 @@ export class ZentinelleGuardrail implements INodeType {
 				const userId = item.json[userIdField] as string || '';
 
 				// Build context
-				let context = JSON.parse(additionalContextJson);
+				let context: Record<string, unknown>;
+				try {
+					context = JSON.parse(additionalContextJson);
+				} catch {
+					throw new Error(`Invalid JSON in additionalContext field: ${additionalContextJson.slice(0, 100)}`);
+				}
 				if (includeInputContext) {
 					// Sanitize input for context (truncate large values)
 					const sanitizedInput: Record<string, unknown> = {};
@@ -175,19 +180,20 @@ export class ZentinelleGuardrail implements INodeType {
 				}
 
 				if (this.continueOnFail()) {
+					const errorMessage = error instanceof Error ? error.message : String(error);
 					blockedItems.push({
 						json: {
 							...item.json,
 							_zentinelle: {
 								allowed: false,
-								error: error.message,
+								error: errorMessage,
 							},
 						},
 						pairedItem: { item: i },
 					});
 					continue;
 				}
-				throw new NodeOperationError(this.getNode(), error, { itemIndex: i });
+				throw new NodeOperationError(this.getNode(), error as Error, { itemIndex: i });
 			}
 		}
 

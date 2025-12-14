@@ -29,7 +29,7 @@
  *   name: 'calculator',
  *   description: 'Calculate math',
  *   parameters: z.object({ expression: z.string() }),
- *   execute: async ({ expression }) => eval(expression),
+ *   execute: async ({ expression }) => calculateSafely(expression), // Use a safe math parser
  * });
  * ```
  */

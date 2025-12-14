@@ -147,16 +147,53 @@ class GovernedToolAgent:
         self.tools[tool.name] = tool
 
     def _calculator(self, expression: str) -> str:
-        """Safe calculator implementation."""
+        """Safe calculator implementation using AST parsing."""
+        import ast
+        import operator
+
+        # Safe operators mapping
+        operators = {
+            ast.Add: operator.add,
+            ast.Sub: operator.sub,
+            ast.Mult: operator.mul,
+            ast.Div: operator.truediv,
+            ast.Pow: operator.pow,
+            ast.USub: operator.neg,
+            ast.UAdd: operator.pos,
+        }
+
+        def safe_eval(node):
+            if isinstance(node, ast.Expression):
+                return safe_eval(node.body)
+            elif isinstance(node, ast.Constant):
+                if isinstance(node.value, (int, float)):
+                    return node.value
+                raise ValueError("Only numeric constants allowed")
+            elif isinstance(node, ast.BinOp):
+                left = safe_eval(node.left)
+                right = safe_eval(node.right)
+                op = operators.get(type(node.op))
+                if op is None:
+                    raise ValueError(f"Unsupported operator: {type(node.op).__name__}")
+                return op(left, right)
+            elif isinstance(node, ast.UnaryOp):
+                operand = safe_eval(node.operand)
+                op = operators.get(type(node.op))
+                if op is None:
+                    raise ValueError(f"Unsupported operator: {type(node.op).__name__}")
+                return op(operand)
+            else:
+                raise ValueError(f"Unsupported expression type: {type(node).__name__}")
+
         try:
-            # Only allow safe math operations
-            allowed = set('0123456789+-*/().^ ')
-            if not all(c in allowed for c in expression):
-                return "Invalid characters in expression"
-            result = eval(expression, {"__builtins__": {}}, {})
+            # Parse expression into AST
+            tree = ast.parse(expression, mode='eval')
+            result = safe_eval(tree)
             return str(result)
-        except Exception as e:
+        except (SyntaxError, ValueError) as e:
             return f"Error: {e}"
+        except Exception as e:
+            return f"Error: Invalid expression"
 
     def _get_weather(self, location: str) -> str:
         """Mock weather function."""

@@ -45,14 +45,13 @@ public class QuickStart {
             .build();
 
         try {
-            // Register agent session
+            // Register agent
             RegisterResult registration = client.register(
                 RegisterOptions.builder()
-                    .userId("user-123")
-                    .sessionId("session-456")
+                    .capabilities(List.of("chat", "tools"))
                     .build()
             );
-            System.out.println("Registered: " + registration.getSessionId());
+            System.out.println("Registered agent: " + registration.getAgentId());
 
             // Evaluate policy before action
             EvaluateResult result = client.evaluate(
@@ -71,10 +70,10 @@ public class QuickStart {
 
                 // Report usage
                 client.emit(
-                    Event.builder()
-                        .category(EventCategory.TOOL_CALL)
-                        .action("web_search")
-                        .success(true)
+                    "tool_call",
+                    Map.of("tool", "web_search", "success", true),
+                    EmitOptions.builder()
+                        .category(EventCategory.AUDIT)
                         .build()
                 );
             } else {
@@ -128,71 +127,61 @@ Track all agent activities:
 ```java
 // Track tool call
 client.emit(
-    Event.builder()
-        .category(EventCategory.TOOL_CALL)
-        .action("web_search")
-        .success(true)
-        .metadata(Map.of(
-            "query", "weather forecast",
-            "results_count", 10
-        ))
+    "tool_call",
+    Map.of(
+        "tool", "web_search",
+        "query", "weather forecast",
+        "results_count", 10
+    ),
+    EmitOptions.builder()
+        .category(EventCategory.AUDIT)
+        .userId("user-123")
         .build()
 );
 
 // Track model usage
-client.emit(
-    Event.builder()
-        .category(EventCategory.MODEL_REQUEST)
-        .action("chat_completion")
-        .success(true)
-        .modelUsage(ModelUsage.builder()
-            .model("gpt-4")
-            .inputTokens(150)
-            .outputTokens(500)
-            .cost(0.025)
-            .build())
-        .build()
+client.trackUsage(ModelUsage.builder()
+    .provider("openai")
+    .model("gpt-4")
+    .inputTokens(150)
+    .outputTokens(500)
+    .estimatedCost(0.025)
+    .build()
 );
 
 // Track errors
 client.emit(
-    Event.builder()
-        .category(EventCategory.ERROR)
-        .action("api_call")
-        .success(false)
-        .metadata(Map.of(
-            "error", "Connection timeout",
-            "endpoint", "/api/data"
-        ))
+    "api_error",
+    Map.of(
+        "error", "Connection timeout",
+        "endpoint", "/api/data"
+    ),
+    EmitOptions.builder()
+        .category(EventCategory.ALERT)
         .build()
 );
 ```
 
-### Configuration & Secrets
+### Secrets
 
-Access runtime configuration:
+Access runtime secrets:
 
 ```java
-// Get full configuration
-PolicyConfig config = client.getConfig();
-System.out.println("Rate limit: " + config.getRateLimits().getRequestsPerMinute());
-System.out.println("Allowed models: " + config.getAllowedModels());
-
 // Get secrets (API keys, etc.)
 Map<String, String> secrets = client.getSecrets();
 String openaiKey = secrets.get("OPENAI_API_KEY");
 ```
 
-### Session Management
+### Agent Registration
 
-Manage agent sessions:
+Register agents with capabilities and metadata:
 
 ```java
 // Register with full options
 RegisterResult result = client.register(
     RegisterOptions.builder()
-        .userId("user-123")
-        .sessionId("session-456")
+        .capabilities(List.of("chat", "tools", "rag"))
+        .name("my-agent")
         .metadata(Map.of(
             "client_version", "2.0.0",
             "environment", "production"
@@ -200,9 +189,10 @@ RegisterResult result = client.register(
         .build()
 );
 
-// Access session info
-String sessionId = result.getSessionId();
-PolicyConfig config = result.getConfig();
+// Access registration info
+String agentId = result.getAgentId();
+Map<String, Object> config = result.getConfig();
+List<PolicyConfig> policies = result.getPolicies();
 ```
 
 ## Advanced Configuration
@@ -225,36 +215,19 @@ ZentinelleClient client = ZentinelleClient.builder()
     .build();
 ```
 
-### Async Operations
+### Background Event Flushing
 
-For non-blocking operations:
+Events are automatically buffered and flushed in the background:
 
 ```java
-import java.util.concurrent.CompletableFuture;
+// Events are buffered and flushed automatically every 5 seconds (configurable)
+client.emit("tool_call", Map.of("tool", "search"), EmitOptions.builder().build());
 
-// Async evaluation
-CompletableFuture<EvaluateResult> future = client.evaluateAsync(
-    "tool_call",
-    EvaluateOptions.builder()
-        .context(Map.of("tool", "search"))
-        .build()
-);
-
-future.thenAccept(result -> {
-    if (result.isAllowed()) {
-        executeToolAsync();
-    }
-});
-
-// Async event emission (fire and forget)
-client.emitAsync(
-    Event.builder()
-        .category(EventCategory.TOOL_CALL)
-        .action("search")
-        .success(true)
-        .build()
-);
+// Or flush manually when needed
+client.flushEvents();
 ```
+
+The client uses a background thread for event flushing, so `emit()` calls are non-blocking.
 
 ### Custom HTTP Client
 
@@ -401,11 +374,14 @@ public class GovernedChatModel implements ChatLanguageModel {
         long duration = System.currentTimeMillis() - startTime;
 
         client.emit(
-            Event.builder()
-                .category(EventCategory.MODEL_REQUEST)
-                .action("generate")
-                .success(true)
-                .durationMs(duration)
+            "model_request",
+            Map.of(
+                "action", "generate",
+                "success", true,
+                "duration_ms", duration
+            ),
+            EmitOptions.builder()
+                .category(EventCategory.TELEMETRY)
                 .build()
         );
 

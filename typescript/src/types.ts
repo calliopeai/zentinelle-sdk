@@ -39,6 +39,8 @@ export interface EvaluateResult {
   }>;
   warnings: string[];
   context: Record<string, unknown>;
+  /** Indicates if this result was returned due to fail-open mode (service unavailable) */
+  failOpen?: boolean;
 }
 
 export interface RegisterResult {

@@ -62,7 +62,13 @@ internal class CircuitBreaker
                     return false;
 
                 case CircuitState.HalfOpen:
-                    return true;
+                    // Only allow limited calls in half-open state to test recovery
+                    if (_halfOpenCalls < _halfOpenMaxCalls)
+                    {
+                        _halfOpenCalls++;
+                        return true;
+                    }
+                    return false;
 
                 default:
                     return false;
@@ -80,11 +86,12 @@ internal class CircuitBreaker
             switch (_state)
             {
                 case CircuitState.HalfOpen:
-                    _halfOpenCalls++;
+                    // If we've had enough successful calls, close the circuit
                     if (_halfOpenCalls >= _halfOpenMaxCalls)
                     {
                         _state = CircuitState.Closed;
                         _failureCount = 0;
+                        _halfOpenCalls = 0;
                     }
                     break;
 

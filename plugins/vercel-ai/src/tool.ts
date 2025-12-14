@@ -44,7 +44,7 @@ export interface GovernedToolOptions<TParams, TResult> {
  *     expression: z.string().describe('Math expression'),
  *   }),
  *   execute: async ({ expression }) => {
- *     return eval(expression);
+ *     return calculateSafely(expression); // Use a safe math parser, never eval()
  *   },
  *   riskLevel: 'low',
  * });

@@ -176,7 +176,12 @@ export class Zentinelle implements INodeType {
 					const action = this.getNodeParameter('action', i) as string;
 					const userId = this.getNodeParameter('userId', i, '') as string;
 					const contextJson = this.getNodeParameter('context', i, '{}') as string;
-					const context = JSON.parse(contextJson);
+					let context: Record<string, unknown>;
+					try {
+						context = JSON.parse(contextJson);
+					} catch {
+						throw new Error(`Invalid JSON in context field: ${contextJson.slice(0, 100)}`);
+					}
 
 					responseData = await this.helpers.httpRequest({
 						method: 'POST',
@@ -207,7 +212,12 @@ export class Zentinelle implements INodeType {
 					const category = this.getNodeParameter('category', i) as string;
 					const userId = this.getNodeParameter('userId', i, '') as string;
 					const payloadJson = this.getNodeParameter('payload', i, '{}') as string;
-					const payload = JSON.parse(payloadJson);
+					let payload: Record<string, unknown>;
+					try {
+						payload = JSON.parse(payloadJson);
+					} catch {
+						throw new Error(`Invalid JSON in payload field: ${payloadJson.slice(0, 100)}`);
+					}
 
 					responseData = await this.helpers.httpRequest({
 						method: 'POST',
@@ -257,16 +267,17 @@ export class Zentinelle implements INodeType {
 
 			} catch (error) {
 				if (this.continueOnFail()) {
+					const errorMessage = error instanceof Error ? error.message : String(error);
 					returnData.push({
 						json: {
-							error: error.message,
+							error: errorMessage,
 							_zentinelle: { allowed: false, shouldContinue: false },
 						},
 						pairedItem: { item: i },
 					});
 					continue;
 				}
-				throw new NodeOperationError(this.getNode(), error, { itemIndex: i });
+				throw new NodeOperationError(this.getNode(), error as Error, { itemIndex: i });
 			}
 		}
 

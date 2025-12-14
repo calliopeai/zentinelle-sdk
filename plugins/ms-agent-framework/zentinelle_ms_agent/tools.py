@@ -14,6 +14,12 @@ P = ParamSpec('P')
 T = TypeVar('T')
 
 
+def _is_coroutine_function(func: Callable) -> bool:
+    """Check if a function is a coroutine function."""
+    import asyncio
+    return asyncio.iscoroutinefunction(func)
+
+
 class PolicyViolationError(Exception):
     """Raised when a tool call is blocked by policy."""
     def __init__(self, message: str, result: EvaluateResult):
@@ -127,7 +133,7 @@ class ZentinelleToolPlugin:
                 )
 
             # Return appropriate wrapper based on function type
-            if asyncio_iscoroutinefunction(func):
+            if _is_coroutine_function(func):
                 return async_wrapper
             return sync_wrapper
 
@@ -183,7 +189,7 @@ class ZentinelleToolPlugin:
 
         # Execute tool
         try:
-            if asyncio_iscoroutinefunction(func):
+            if _is_coroutine_function(func):
                 output = await func(*args, **kwargs)
             else:
                 output = func(*args, **kwargs)
@@ -219,12 +225,6 @@ class ZentinelleToolPlugin:
         self.client.shutdown()
 
 
-def asyncio_iscoroutinefunction(func: Callable) -> bool:
-    """Check if a function is a coroutine function."""
-    import asyncio
-    return asyncio.iscoroutinefunction(func)
-
-
 def governed_tool(
     client: ZentinelleClient,
     tool_name: str,
@@ -241,7 +241,9 @@ def governed_tool(
 
         @governed_tool(client, "calculator")
         def calculate(expression: str) -> float:
-            return eval(expression)
+            # WARNING: Use a safe math parser in production, never eval()
+            import ast
+            return ast.literal_eval(expression)  # Only evaluates literals
     """
     def decorator(func: Callable[P, T]) -> Callable[P, T]:
         @wraps(func)

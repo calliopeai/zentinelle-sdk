@@ -296,7 +296,7 @@ const calculator = governed.tool({
   name: 'calculator',
   description: 'Perform calculations',
   parameters: z.object({ expression: z.string() }),
-  execute: async ({ expression }) => eval(expression),
+  execute: async ({ expression }) => calculateSafely(expression), // Use a safe math parser, never eval()
   riskLevel: 'low',
 });
 ```

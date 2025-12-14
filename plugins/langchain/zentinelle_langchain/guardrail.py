@@ -1,6 +1,7 @@
 """
 LangChain guardrails for Zentinelle policy enforcement.
 """
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional, Callable, Union
 from functools import wraps
@@ -110,8 +111,8 @@ class ZentinelleGuardrail(Runnable):
         config: Optional[RunnableConfig] = None,
     ) -> Any:
         """Async version of invoke."""
-        # For now, run sync version (ZentinelleClient is sync)
-        return self.invoke(input, config)
+        # Run sync client operations in thread pool to avoid blocking event loop
+        return await asyncio.to_thread(self.invoke, input, config)
 
     def output(
         self,
@@ -187,7 +188,9 @@ class ZentinelleOutputGuardrail(Runnable):
         input: Any,
         config: Optional[RunnableConfig] = None,
     ) -> Any:
-        return self.invoke(input, config)
+        """Async version of invoke."""
+        # Run sync client operations in thread pool to avoid blocking event loop
+        return await asyncio.to_thread(self.invoke, input, config)
 
 
 class ZentinelleToolWrapper:

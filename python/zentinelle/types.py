@@ -61,6 +61,11 @@ class EvaluateResult:
     policies_evaluated: List[Dict[str, Any]] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
     context: Dict[str, Any] = field(default_factory=dict)
+    fail_open: bool = False
+
+    def is_fail_open(self) -> bool:
+        """Check if this result was returned due to fail-open mode (service unavailable)."""
+        return self.fail_open
 
     def require_human_approval(self) -> bool:
         """Check if human approval is required."""

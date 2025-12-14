@@ -16,6 +16,11 @@ public class ZentinelleOptions
     public required string AgentId { get; set; }
 
     /// <summary>
+    /// The type of agent (e.g., "langchain", "crewai", "custom"). Required.
+    /// </summary>
+    public required string AgentType { get; set; }
+
+    /// <summary>
     /// Base URL for the Zentinelle API.
     /// </summary>
     public string BaseUrl { get; set; } = "https://api.zentinelle.ai";
@@ -43,7 +48,7 @@ public class ZentinelleOptions
     /// <summary>
     /// Time to wait before attempting recovery after circuit breaker opens.
     /// </summary>
-    public TimeSpan CircuitBreakerRecovery { get; set; } = TimeSpan.FromMinutes(1);
+    public TimeSpan CircuitBreakerRecovery { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// Interval between heartbeat requests.

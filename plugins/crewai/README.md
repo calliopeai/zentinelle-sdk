@@ -166,7 +166,9 @@ search_tool = GovernedTool(
 )
 def calculate(expression: str) -> float:
     """Calculate a mathematical expression."""
-    return eval(expression)
+    # WARNING: Use a safe math parser in production, never eval()
+    import ast
+    return ast.literal_eval(expression)  # Only evaluates literals
 ```
 
 ### Governed Crews
