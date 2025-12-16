@@ -3,16 +3,16 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sentinel-sdk"
+name = "zentinelle"
 version = "0.1.0"
-description = "Python SDK for integrating AI agents with the Sentinel policy engine"
+description = "Python SDK for AI agent governance and runtime control"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.8"
 authors = [
     {name = "Calliope AI", email = "engineering@calliope.ai"},
 ]
-keywords = ["sentinel", "ai", "agents", "policy", "sdk"]
+keywords = ["zentinelle", "ai", "agents", "governance", "guardrails", "llm", "observability"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -43,14 +43,14 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/calliopeai/sentinel-sdk"
-Documentation = "https://github.com/calliopeai/sentinel-sdk#readme"
-Repository = "https://github.com/calliopeai/sentinel-sdk.git"
-Issues = "https://github.com/calliopeai/sentinel-sdk/issues"
+Homepage = "https://zentinelle.ai"
+Documentation = "https://docs.zentinelle.ai"
+Repository = "https://github.com/calliopeai/zentinelle-sdk.git"
+Issues = "https://github.com/calliopeai/zentinelle-sdk/issues"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["sentinel_sdk*"]
+where = ["python"]
+include = ["zentinelle*"]
 
 [tool.black]
 line-length = 100

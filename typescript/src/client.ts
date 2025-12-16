@@ -2,6 +2,8 @@
  * Zentinelle SDK Client - Main client for AI agent governance.
  */
 
+const VERSION = '0.1.0';
+
 import {
   ZentinelleError,
   ZentinelleConnectionError,
@@ -63,6 +65,7 @@ export class ZentinelleClient {
 
   private configCache: Record<string, unknown> | null = null;
   private configCacheTime: Date | null = null;
+  private policiesCache: PolicyConfig[] = [];
   private readonly configCacheTtl = 300000; // 5 minutes
 
   private secretsCache: Record<string, string> | null = null;
@@ -90,8 +93,10 @@ export class ZentinelleClient {
 
     this.endpoint = (options.endpoint ?? 'https://api.zentinelle.ai').replace(/\/$/, '');
     // Enforce HTTPS for security (API keys are transmitted in headers)
-    if (!this.endpoint.startsWith('https://')) {
-      throw new Error('endpoint must use HTTPS for security');
+    // Allow localhost/127.0.0.1 for local development
+    const isLocalhost = this.endpoint.includes('localhost') || this.endpoint.includes('127.0.0.1');
+    if (!this.endpoint.startsWith('https://') && !isLocalhost) {
+      throw new Error('endpoint must use HTTPS for security (localhost excepted)');
     }
     this.apiKey = options.apiKey;
     this.agentType = options.agentType;
@@ -155,7 +160,7 @@ export class ZentinelleClient {
   private getHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
-      'User-Agent': 'zentinelle-js/0.1.0',
+      'User-Agent': `zentinelle-js/${VERSION}`,
     };
     if (this.apiKey) {
       headers['X-Zentinelle-Key'] = this.apiKey;
@@ -307,6 +312,14 @@ export class ZentinelleClient {
     this.registered = true;
     this.configCache = response.config;
     this.configCacheTime = new Date();
+    this.policiesCache = response.policies.map((p) => ({
+      id: p.id,
+      name: p.name,
+      type: p.type as PolicyConfig['type'],
+      enforcement: p.enforcement as PolicyConfig['enforcement'],
+      config: p.config,
+      priority: p.priority,
+    }));
 
     return {
       agentId: response.agent_id,
@@ -324,16 +337,29 @@ export class ZentinelleClient {
   }
 
   // ===========================================================================
+  // Helpers
+  // ===========================================================================
+
+  private requireAgentId(): void {
+    if (!this.agentId) {
+      throw new ZentinelleError(
+        'Agent not registered. Call register() first or provide agentId in constructor.'
+      );
+    }
+  }
+
+  // ===========================================================================
   // Configuration
   // ===========================================================================
 
   async getConfig(forceRefresh = false): Promise<ConfigResult> {
+    this.requireAgentId();
     if (!forceRefresh && this.configCache && this.configCacheTime) {
       if (Date.now() - this.configCacheTime.getTime() < this.configCacheTtl) {
         return {
           agentId: this.agentId!,
-          config: this.configCache,
-          policies: [],
+          config: { ...this.configCache },
+          policies: [...this.policiesCache],
           updatedAt: this.configCacheTime,
         };
       }
@@ -354,17 +380,18 @@ export class ZentinelleClient {
 
     this.configCache = response.config;
     this.configCacheTime = new Date();
+    this.policiesCache = response.policies.map((p) => ({
+      id: p.id,
+      name: p.name,
+      type: p.type as PolicyConfig['type'],
+      enforcement: p.enforcement as PolicyConfig['enforcement'],
+      config: p.config,
+    }));
 
     return {
       agentId: response.agent_id,
       config: response.config,
-      policies: response.policies.map((p) => ({
-        id: p.id,
-        name: p.name,
-        type: p.type as PolicyConfig['type'],
-        enforcement: p.enforcement as PolicyConfig['enforcement'],
-        config: p.config,
-      })),
+      policies: this.policiesCache,
       updatedAt: new Date(response.updated_at),
     };
   }
@@ -374,6 +401,7 @@ export class ZentinelleClient {
   // ===========================================================================
 
   async getSecrets(forceRefresh = false): Promise<Record<string, string>> {
+    this.requireAgentId();
     if (!forceRefresh && this.secretsCache && this.secretsCacheTime) {
       if (Date.now() - this.secretsCacheTime.getTime() < this.secretsCacheTtl) {
         // Return a copy to prevent external mutation
@@ -408,6 +436,7 @@ export class ZentinelleClient {
       context?: Record<string, unknown>;
     } = {}
   ): Promise<EvaluateResult> {
+    this.requireAgentId();
     const response = await this.request<{
       allowed: boolean;
       reason?: string;
@@ -642,6 +671,7 @@ export class ZentinelleClient {
     this.secretsCacheTime = null;
     this.configCache = null;
     this.configCacheTime = null;
+    this.policiesCache = [];
   }
 
   get isRegistered(): boolean {

@@ -21,6 +21,8 @@
  * ```
  */
 
+export const VERSION = '0.1.0';
+
 export { ZentinelleClient } from './client';
 export type { ZentinelleClientOptions } from './client';
 

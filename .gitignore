@@ -74,3 +74,13 @@ dmypy.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Node.js
+node_modules/
+package-lock.json
+*.log
+.npm/
+
+# TypeScript build output
+dist/
+*.tsbuildinfo

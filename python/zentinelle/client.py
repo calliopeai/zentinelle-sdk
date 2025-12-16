@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 
+from ._version import __version__
 from .types import (
     EvaluateResult,
     PolicyConfig,
@@ -265,8 +266,10 @@ class ZentinelleClient:
 
         self.endpoint = (endpoint or self.DEFAULT_ENDPOINT).rstrip('/')
         # Enforce HTTPS for security (API keys are transmitted in headers)
-        if not self.endpoint.startswith('https://'):
-            raise ValueError("endpoint must use HTTPS for security")
+        # Allow localhost/127.0.0.1 for local development
+        is_localhost = 'localhost' in self.endpoint or '127.0.0.1' in self.endpoint
+        if not self.endpoint.startswith('https://') and not is_localhost:
+            raise ValueError("endpoint must use HTTPS for security (localhost excepted)")
         self.api_key = api_key
         self.agent_type = agent_type
         self.agent_id = agent_id
@@ -332,7 +335,7 @@ class ZentinelleClient:
         """Get request headers."""
         headers = {
             'Content-Type': 'application/json',
-            'User-Agent': 'zentinelle-python/0.1.0',
+            'User-Agent': f'zentinelle-python/{__version__}',
         }
         if self.api_key:
             headers['X-Zentinelle-Key'] = self.api_key
