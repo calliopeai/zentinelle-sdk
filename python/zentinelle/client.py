@@ -361,7 +361,12 @@ class ZentinelleClient:
             )
 
         response.raise_for_status()
-        return response.json()
+        try:
+            return response.json()
+        except requests.exceptions.JSONDecodeError as e:
+            raise ZentinelleConnectionError(
+                f"Invalid JSON response from server: {e}"
+            ) from e
 
     def _get(self, path: str) -> Dict:
         """Make GET request with retry logic."""
@@ -536,6 +541,13 @@ class ZentinelleClient:
     # Configuration
     # =========================================================================
 
+    def _require_agent_id(self) -> None:
+        """Raise error if agent_id is not set (i.e., register() not called)."""
+        if not self.agent_id:
+            raise ZentinelleError(
+                "Agent not registered. Call register() first or provide agent_id in constructor."
+            )
+
     def get_config(self, force_refresh: bool = False) -> ConfigResult:
         """
         Get current config and policies (cached).
@@ -545,7 +557,11 @@ class ZentinelleClient:
 
         Returns:
             ConfigResult with config and policies
+
+        Raises:
+            ZentinelleError: If agent is not registered
         """
+        self._require_agent_id()
         # Thread-safe cache check
         with self._cache_lock:
             if not force_refresh and self._config_cache is not None and self._config_cache_time:
@@ -600,7 +616,11 @@ class ZentinelleClient:
 
         Returns:
             Dictionary of secret name -> value (copy to prevent mutation)
+
+        Raises:
+            ZentinelleError: If agent is not registered
         """
+        self._require_agent_id()
         # Thread-safe cache check
         with self._cache_lock:
             if not force_refresh and self._secrets_cache and self._secrets_cache_time:
@@ -639,7 +659,11 @@ class ZentinelleClient:
 
         Returns:
             EvaluateResult with allowed status and details
+
+        Raises:
+            ZentinelleError: If agent is not registered
         """
+        self._require_agent_id()
         response = self._post_for_evaluate('/evaluate', {
             'agent_id': self.agent_id,
             'action': action,
@@ -795,13 +819,17 @@ class ZentinelleClient:
                 accepted=response.get('accepted', len(events)),
                 batch_id=response.get('batch_id', ''),
             )
-        except Exception as e:
+        except (ZentinelleConnectionError, ZentinelleRateLimitError, requests.RequestException) as e:
             logger.warning(f"Failed to flush events: {e}")
-            # Re-queue events on failure (lock already held by caller)
+            # Re-queue events on transient failures (lock already held by caller)
             if len(self._event_buffer) + len(events) <= self._max_buffer_size:
                 self._event_buffer = events + self._event_buffer
             else:
                 logger.warning(f"Failed to flush {len(events)} events and buffer is full, events dropped")
+            return None
+        except ZentinelleAuthError as e:
+            # Auth errors should not requeue - configuration issue
+            logger.error(f"Authentication failed while flushing events: {e}")
             return None
 
     def _flush_loop(self) -> None:
@@ -846,8 +874,11 @@ class ZentinelleClient:
                 config_changed=response.get('config_changed', False),
                 next_heartbeat_seconds=response.get('next_heartbeat_seconds', 60),
             )
-        except Exception as e:
+        except (ZentinelleConnectionError, ZentinelleRateLimitError, requests.RequestException) as e:
             logger.warning(f"Failed to send heartbeat: {e}")
+            return None
+        except ZentinelleAuthError as e:
+            logger.error(f"Authentication failed during heartbeat: {e}")
             return None
 
     def _heartbeat_loop(self) -> None:

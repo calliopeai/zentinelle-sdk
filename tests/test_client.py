@@ -269,6 +269,7 @@ class TestEvaluateFailOpen:
             client = ZentinelleClient(
                 api_key="sk_agent_test123",
                 agent_type="test",
+                agent_id="test-agent",
                 auto_heartbeat=False,
             )
             # Mock _post_for_evaluate to return response without 'allowed'
@@ -283,6 +284,7 @@ class TestEvaluateFailOpen:
             client = ZentinelleClient(
                 api_key="sk_agent_test123",
                 agent_type="test",
+                agent_id="test-agent",
                 auto_heartbeat=False,
             )
             # Mock _post_for_evaluate to return fail-open response
@@ -302,6 +304,7 @@ class TestEvaluateFailOpen:
             client = ZentinelleClient(
                 api_key="sk_agent_test123",
                 agent_type="test",
+                agent_id="test-agent",
                 auto_heartbeat=False,
             )
             with patch.object(client, '_post_for_evaluate', return_value={
@@ -369,3 +372,299 @@ class TestEventBufferBounds:
             assert client._event_buffer[-1]['payload']['index'] == 5
 
             client._running = False
+
+
+class TestAgentIdValidation:
+    """Tests for agent_id validation before API calls."""
+
+    def test_get_config_requires_agent_id(self):
+        """get_config() should raise if agent_id is not set."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            # agent_id is None by default
+            with pytest.raises(ZentinelleError, match="Agent not registered"):
+                client.get_config()
+            client._running = False
+
+    def test_get_secrets_requires_agent_id(self):
+        """get_secrets() should raise if agent_id is not set."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            with pytest.raises(ZentinelleError, match="Agent not registered"):
+                client.get_secrets()
+            client._running = False
+
+    def test_evaluate_requires_agent_id(self):
+        """evaluate() should raise if agent_id is not set."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            with pytest.raises(ZentinelleError, match="Agent not registered"):
+                client.evaluate("test_action")
+            client._running = False
+
+    def test_agent_id_from_constructor_works(self):
+        """Agent ID provided in constructor should be valid."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="pre-registered-agent",
+                auto_heartbeat=False,
+            )
+            # Should not raise - agent_id is set
+            with patch.object(client, '_get', return_value={'config': {}, 'policies': []}):
+                result = client.get_config()
+                assert result is not None
+            client._running = False
+
+
+class TestRegister:
+    """Tests for register() method."""
+
+    def test_register_success(self):
+        """register() should update agent_id and cache config."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            mock_response = {
+                'agent_id': 'new-agent-id',
+                'api_key': 'sk_new_key',
+                'config': {'setting': 'value'},
+                'policies': [{'id': 'p1', 'name': 'Policy', 'type': 'test', 'enforcement': 'enforce', 'config': {}}],
+            }
+            with patch.object(client, '_post', return_value=mock_response):
+                result = client.register(capabilities=['chat'])
+
+            assert result.agent_id == 'new-agent-id'
+            assert result.api_key == 'sk_new_key'
+            assert result.config == {'setting': 'value'}
+            assert len(result.policies) == 1
+            assert client.agent_id == 'new-agent-id'
+            assert client._registered is True
+            client._running = False
+
+
+class TestGetConfig:
+    """Tests for get_config() method."""
+
+    def test_get_config_caches_result(self):
+        """get_config() should cache result and return from cache on second call."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            mock_response = {
+                'agent_id': 'test-agent',
+                'config': {'cached': True},
+                'policies': [{'id': 'p1', 'name': 'Policy', 'type': 'test', 'enforcement': 'enforce', 'config': {}}],
+                'updated_at': '2025-01-01T00:00:00Z',
+            }
+            with patch.object(client, '_get', return_value=mock_response) as mock_get:
+                # First call - should hit API
+                result1 = client.get_config()
+                # Second call - should use cache
+                result2 = client.get_config()
+
+                assert mock_get.call_count == 1
+                assert result1.config == {'cached': True}
+                assert result2.config == {'cached': True}
+                # Policies should also be cached
+                assert len(result2.policies) == 1
+            client._running = False
+
+    def test_get_config_force_refresh(self):
+        """get_config(force_refresh=True) should bypass cache."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            mock_response = {
+                'agent_id': 'test-agent',
+                'config': {'fresh': True},
+                'policies': [],
+                'updated_at': '2025-01-01T00:00:00Z',
+            }
+            with patch.object(client, '_get', return_value=mock_response) as mock_get:
+                client.get_config()
+                client.get_config(force_refresh=True)
+
+                assert mock_get.call_count == 2
+            client._running = False
+
+
+class TestGetSecrets:
+    """Tests for get_secrets() method."""
+
+    def test_get_secrets_returns_copy(self):
+        """get_secrets() should return a copy to prevent mutation."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            mock_response = {'secrets': {'API_KEY': 'secret123'}}
+            with patch.object(client, '_get', return_value=mock_response):
+                secrets = client.get_secrets()
+                secrets['API_KEY'] = 'modified'
+
+                # Original cache should not be modified
+                secrets2 = client.get_secrets()
+                assert secrets2['API_KEY'] == 'secret123'
+            client._running = False
+
+    def test_get_secret_convenience(self):
+        """get_secret() should return single value."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            mock_response = {'secrets': {'API_KEY': 'secret123'}}
+            with patch.object(client, '_get', return_value=mock_response):
+                assert client.get_secret('API_KEY') == 'secret123'
+                assert client.get_secret('MISSING') is None
+                assert client.get_secret('MISSING', 'default') == 'default'
+            client._running = False
+
+
+class TestJSONParsingErrors:
+    """Tests for JSON parsing error handling."""
+
+    def test_invalid_json_raises_connection_error(self):
+        """Invalid JSON response should raise ZentinelleConnectionError."""
+        import requests
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            mock_response = Mock()
+            mock_response.status_code = 200
+            mock_response.json.side_effect = requests.exceptions.JSONDecodeError("error", "doc", 0)
+            mock_response.raise_for_status = Mock()
+
+            with patch('requests.get', return_value=mock_response):
+                with pytest.raises(ZentinelleConnectionError, match="Invalid JSON response"):
+                    client.get_config()
+            client._running = False
+
+
+class TestHTTPErrorHandling:
+    """Tests for HTTP error handling."""
+
+    def test_401_raises_auth_error(self):
+        """401 response should raise ZentinelleAuthError."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            mock_response = Mock()
+            mock_response.status_code = 401
+
+            with patch('requests.get', return_value=mock_response):
+                with pytest.raises(ZentinelleAuthError, match="Invalid or expired"):
+                    client.get_config()
+            client._running = False
+
+    def test_429_raises_rate_limit_error(self):
+        """429 response should raise ZentinelleRateLimitError with retry_after."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            mock_response = Mock()
+            mock_response.status_code = 429
+            mock_response.headers = {'Retry-After': '60'}
+
+            with patch('requests.get', return_value=mock_response):
+                with pytest.raises(ZentinelleRateLimitError) as exc_info:
+                    client.get_config()
+                assert exc_info.value.retry_after == 60
+            client._running = False
+
+    def test_500_raises_connection_error(self):
+        """500 response should raise ZentinelleConnectionError."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            mock_response = Mock()
+            mock_response.status_code = 500
+            mock_response.text = "Internal Server Error"
+
+            with patch('requests.get', return_value=mock_response):
+                with pytest.raises(ZentinelleConnectionError, match="Server error"):
+                    client.get_config()
+            client._running = False
+
+
+class TestShutdown:
+    """Tests for shutdown() method."""
+
+    def test_shutdown_clears_sensitive_data(self):
+        """shutdown() should clear caches and API key."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            # Set some cache data
+            client._secrets_cache = {'secret': 'value'}
+            client._config_cache = {'config': 'value'}
+
+            client.shutdown(timeout=0.1)
+
+            assert client._secrets_cache is None
+            assert client._config_cache is None
+            assert client.api_key == ""
+            assert client._running is False
+
+    def test_context_manager_calls_shutdown(self):
+        """Using client as context manager should call shutdown on exit."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            with ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            ) as client:
+                assert client._running is True
+
+            assert client._running is False
