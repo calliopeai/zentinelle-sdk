@@ -668,3 +668,316 @@ class TestShutdown:
                 assert client._running is True
 
             assert client._running is False
+
+
+class TestCanUseModel:
+    """Tests for can_use_model() convenience method."""
+
+    def test_can_use_model_allowed(self):
+        """can_use_model() should return allowed result."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            with patch.object(client, '_post_for_evaluate', return_value={
+                'allowed': True,
+                'policies_evaluated': [],
+            }):
+                result = client.can_use_model("gpt-4")
+                assert result.allowed is True
+            client._running = False
+
+    def test_can_use_model_denied(self):
+        """can_use_model() should return denied result with reason."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            with patch.object(client, '_post_for_evaluate', return_value={
+                'allowed': False,
+                'reason': 'Model not in allowlist',
+                'policies_evaluated': [{'name': 'model_restriction', 'passed': False}],
+            }):
+                result = client.can_use_model("gpt-4-turbo", provider="openai")
+                assert result.allowed is False
+                assert result.reason == 'Model not in allowlist'
+            client._running = False
+
+
+class TestCanCallTool:
+    """Tests for can_call_tool() convenience method."""
+
+    def test_can_call_tool_allowed(self):
+        """can_call_tool() should return allowed result."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            with patch.object(client, '_post_for_evaluate', return_value={
+                'allowed': True,
+                'policies_evaluated': [],
+            }):
+                result = client.can_call_tool("web_search", user_id="user123")
+                assert result.allowed is True
+            client._running = False
+
+    def test_can_call_tool_denied(self):
+        """can_call_tool() should return denied result."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            with patch.object(client, '_post_for_evaluate', return_value={
+                'allowed': False,
+                'reason': 'Tool not allowed',
+                'policies_evaluated': [],
+            }):
+                result = client.can_call_tool("dangerous_tool", user_id="user123")
+                assert result.allowed is False
+            client._running = False
+
+
+class TestTrackUsage:
+    """Tests for track_usage() method."""
+
+    def test_track_usage_emits_event(self):
+        """track_usage() should emit a telemetry event."""
+        from zentinelle import ModelUsage
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            usage = ModelUsage(
+                provider="openai",
+                model="gpt-4",
+                input_tokens=100,
+                output_tokens=50,
+            )
+            client.track_usage(usage)
+
+            assert len(client._event_buffer) == 1
+            event = client._event_buffer[0]
+            assert event['type'] == 'model_usage'
+            assert event['payload']['provider'] == 'openai'
+            assert event['payload']['model'] == 'gpt-4'
+            assert event['payload']['input_tokens'] == 100
+            assert event['payload']['output_tokens'] == 50
+            client._running = False
+
+
+class TestHeartbeat:
+    """Tests for heartbeat() method."""
+
+    def test_heartbeat_success(self):
+        """heartbeat() should send status and return result."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            client._registered = True
+            mock_response = {
+                'acknowledged': True,
+                'config_changed': False,
+                'next_heartbeat_seconds': 60,
+            }
+            with patch.object(client, '_post', return_value=mock_response):
+                result = client.heartbeat(status='healthy', metrics={'cpu': 50})
+
+                assert result is not None
+                assert result.acknowledged is True
+                assert result.config_changed is False
+            client._running = False
+
+    def test_heartbeat_skipped_when_not_registered(self):
+        """heartbeat() should return None if not registered."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            # Not registered
+            result = client.heartbeat()
+            assert result is None
+            client._running = False
+
+
+class TestFlushEvents:
+    """Tests for flush_events() method."""
+
+    def test_flush_events_success(self):
+        """flush_events() should send buffered events."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            client._registered = True
+            client.emit("test_event", {"key": "value"})
+            assert len(client._event_buffer) == 1
+
+            mock_response = {'accepted': 1, 'batch_id': 'batch-123'}
+            with patch.object(client, '_post', return_value=mock_response):
+                result = client.flush_events()
+
+                assert result is not None
+                assert result.accepted == 1
+                assert len(client._event_buffer) == 0
+            client._running = False
+
+    def test_flush_events_empty_buffer(self):
+        """flush_events() should return None for empty buffer."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            result = client.flush_events()
+            assert result is None
+            client._running = False
+
+
+class TestEmitToolCall:
+    """Tests for emit_tool_call() convenience method."""
+
+    def test_emit_tool_call_basic(self):
+        """emit_tool_call() should emit audit event."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            client.emit_tool_call("web_search", user_id="user123", duration_ms=150)
+
+            assert len(client._event_buffer) == 1
+            event = client._event_buffer[0]
+            assert event['type'] == 'tool_call'
+            assert event['category'] == 'audit'
+            assert event['payload']['tool'] == 'web_search'
+            assert event['payload']['duration_ms'] == 150
+            client._running = False
+
+    def test_emit_tool_call_with_inputs_outputs(self):
+        """emit_tool_call() should include inputs and outputs."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            client.emit_tool_call(
+                "api_call",
+                user_id="user123",
+                inputs={"query": "test"},
+                outputs={"result": "success"},
+            )
+
+            event = client._event_buffer[0]
+            assert event['payload']['inputs'] == {"query": "test"}
+            assert event['payload']['outputs'] == {"result": "success"}
+            client._running = False
+
+
+class TestEmitModelRequest:
+    """Tests for emit_model_request() convenience method."""
+
+    def test_emit_model_request(self):
+        """emit_model_request() should emit telemetry event."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            client.emit_model_request(
+                provider="openai",
+                model="gpt-4",
+                input_tokens=500,
+                output_tokens=200,
+                user_id="user123",
+                duration_ms=1500,
+            )
+
+            event = client._event_buffer[0]
+            assert event['type'] == 'model_request'
+            assert event['category'] == 'telemetry'
+            assert event['payload']['provider'] == 'openai'
+            assert event['payload']['model'] == 'gpt-4'
+            assert event['payload']['input_tokens'] == 500
+            assert event['payload']['output_tokens'] == 200
+            assert event['payload']['duration_ms'] == 1500
+            client._running = False
+
+
+class TestGetPolicies:
+    """Tests for get_policies() method."""
+
+    def test_get_policies_returns_all(self):
+        """get_policies() should return all policies from config."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            mock_response = {
+                'agent_id': 'test-agent',
+                'config': {},
+                'policies': [
+                    {'id': 'p1', 'name': 'Rate Limit', 'type': 'rate_limit', 'enforcement': 'enforce', 'config': {}},
+                    {'id': 'p2', 'name': 'Model Check', 'type': 'model_restriction', 'enforcement': 'enforce', 'config': {}},
+                ],
+                'updated_at': '2025-01-01T00:00:00Z',
+            }
+            with patch.object(client, '_get', return_value=mock_response):
+                policies = client.get_policies()
+                assert len(policies) == 2
+            client._running = False
+
+    def test_get_policies_filters_by_type(self):
+        """get_policies() should filter by policy_types."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            mock_response = {
+                'agent_id': 'test-agent',
+                'config': {},
+                'policies': [
+                    {'id': 'p1', 'name': 'Rate Limit', 'type': 'rate_limit', 'enforcement': 'enforce', 'config': {}},
+                    {'id': 'p2', 'name': 'Model Check', 'type': 'model_restriction', 'enforcement': 'enforce', 'config': {}},
+                ],
+                'updated_at': '2025-01-01T00:00:00Z',
+            }
+            with patch.object(client, '_get', return_value=mock_response):
+                policies = client.get_policies(policy_types=['rate_limit'])
+                assert len(policies) == 1
+                assert policies[0].type == 'rate_limit'
+            client._running = False

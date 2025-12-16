@@ -6,7 +6,7 @@ import time
 import logging
 import random
 import requests
-from typing import List, Dict, Any, Optional, Callable
+from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 

@@ -59,6 +59,8 @@ from .types import (
     ConfigResult,
     SecretsResult,
     EventsResult,
+    HeartbeatResult,
+    ModelUsage,
 )
 
 __all__ = [
@@ -79,6 +81,8 @@ __all__ = [
     'ConfigResult',
     'SecretsResult',
     'EventsResult',
+    'HeartbeatResult',
+    'ModelUsage',
 ]
 
 __version__ = '0.1.0'
