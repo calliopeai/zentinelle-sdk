@@ -211,9 +211,9 @@ Emit an event (buffered, async).
 
 Send a heartbeat to Sentinel.
 
-#### `shutdown()`
+#### `shutdown(timeout=5.0)`
 
-Graceful shutdown: stop threads and flush remaining events.
+Graceful shutdown: stop threads and flush remaining events. The `timeout` parameter specifies maximum seconds to wait for each background thread to stop.
 
 ## License
 

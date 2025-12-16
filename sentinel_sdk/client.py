@@ -7,7 +7,7 @@ import logging
 import random
 import requests
 from typing import List, Dict, Any, Optional, Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dataclasses import asdict
 from functools import wraps
 
@@ -311,6 +311,7 @@ class SentinelClient:
         # Caches
         self._config_cache: Optional[Dict] = None
         self._config_cache_time: Optional[datetime] = None
+        self._policies_cache: List[PolicyConfig] = []
         self._secrets_cache: Optional[Dict] = None
         self._secrets_cache_time: Optional[datetime] = None
 
@@ -321,6 +322,7 @@ class SentinelClient:
         # Background threads
         self._running = True
         self._registered = False
+        self._heartbeat_thread: Optional[threading.Thread] = None
 
         # Start flush thread
         self._flush_thread = threading.Thread(
@@ -503,17 +505,18 @@ class SentinelClient:
         self.agent_id = response['agent_id']
         self._registered = True
 
-        # Cache the config
+        policies = [
+            PolicyConfig(**p) for p in response.get('policies', [])
+        ]
+
+        # Cache the config and policies
         self._config_cache = response.get('config', {})
-        self._config_cache_time = datetime.utcnow()
+        self._policies_cache = policies
+        self._config_cache_time = datetime.now(timezone.utc)
 
         # Update API key if new one provided
         if response.get('api_key'):
             self.api_key = response['api_key']
-
-        policies = [
-            PolicyConfig(**p) for p in response.get('policies', [])
-        ]
 
         logger.info(f"Registered agent: {self.agent_id}")
 
@@ -540,23 +543,24 @@ class SentinelClient:
             ConfigResult with config and policies
         """
         # Check cache
-        if not force_refresh and self._config_cache and self._config_cache_time:
-            if datetime.utcnow() - self._config_cache_time < self._config_cache_ttl:
+        if not force_refresh and self._config_cache is not None and self._config_cache_time:
+            if datetime.now(timezone.utc) - self._config_cache_time < self._config_cache_ttl:
                 return ConfigResult(
                     agent_id=self.agent_id,
                     config=self._config_cache,
-                    policies=[],  # Would need to cache policies too
+                    policies=self._policies_cache,
                     updated_at=self._config_cache_time,
                 )
 
         response = self._get(f'/config/{self.agent_id}')
 
-        self._config_cache = response.get('config', {})
-        self._config_cache_time = datetime.utcnow()
-
         policies = [
             PolicyConfig(**p) for p in response.get('policies', [])
         ]
+
+        self._config_cache = response.get('config', {})
+        self._policies_cache = policies
+        self._config_cache_time = datetime.now(timezone.utc)
 
         return ConfigResult(
             agent_id=response['agent_id'],
@@ -600,13 +604,13 @@ class SentinelClient:
         """
         # Check cache
         if not force_refresh and self._secrets_cache and self._secrets_cache_time:
-            if datetime.utcnow() - self._secrets_cache_time < self._secrets_cache_ttl:
+            if datetime.now(timezone.utc) - self._secrets_cache_time < self._secrets_cache_ttl:
                 return self._secrets_cache
 
         response = self._get(f'/secrets/{self.agent_id}')
 
         self._secrets_cache = response.get('secrets', {})
-        self._secrets_cache_time = datetime.utcnow()
+        self._secrets_cache_time = datetime.now(timezone.utc)
 
         return self._secrets_cache
 
@@ -715,7 +719,7 @@ class SentinelClient:
             'type': event_type,
             'category': category,
             'payload': payload or {},
-            'timestamp': datetime.utcnow().isoformat() + 'Z',
+            'timestamp': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
             'user_id': user_id or '',
         }
 
@@ -784,10 +788,16 @@ class SentinelClient:
             )
         except Exception as e:
             logger.warning(f"Failed to flush events: {e}")
-            # Re-queue events on failure (with limit)
-            with self._buffer_lock:
-                if len(self._event_buffer) < self._event_buffer_size * 2:
-                    self._event_buffer = events + self._event_buffer
+            # Re-queue events on failure (with limit to prevent unbounded growth)
+            # Note: caller holds the lock, so we access _event_buffer directly
+            if len(self._event_buffer) < self._event_buffer_size * 2:
+                self._event_buffer = events + self._event_buffer
+            else:
+                dropped_count = len(events)
+                logger.warning(
+                    f"Dropping {dropped_count} events due to buffer overflow "
+                    f"(buffer at {len(self._event_buffer)}, limit {self._event_buffer_size * 2})"
+                )
             return None
 
     def _flush_loop(self) -> None:
@@ -835,14 +845,30 @@ class SentinelClient:
     # Lifecycle
     # =========================================================================
 
-    def shutdown(self) -> None:
-        """Graceful shutdown: stop threads and flush remaining events."""
+    def shutdown(self, timeout: float = 5.0) -> None:
+        """
+        Graceful shutdown: stop threads and flush remaining events.
+
+        Args:
+            timeout: Maximum seconds to wait for each thread to stop
+        """
         logger.info("Shutting down Sentinel client")
         self._running = False
 
         # Final flush
         with self._buffer_lock:
             self._flush_events_sync()
+
+        # Wait for threads to finish
+        if self._flush_thread.is_alive():
+            self._flush_thread.join(timeout=timeout)
+            if self._flush_thread.is_alive():
+                logger.warning("Flush thread did not stop within timeout")
+
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+            self._heartbeat_thread.join(timeout=timeout)
+            if self._heartbeat_thread.is_alive():
+                logger.warning("Heartbeat thread did not stop within timeout")
 
     def __enter__(self):
         return self
