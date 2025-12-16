@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zentinelle-llamaindex"
+version = "0.1.0"
+description = "Zentinelle governance integration for LlamaIndex RAG applications"
+readme = "README.md"
+license = "Apache-2.0"
+authors = [
+    { name = "Zentinelle AI", email = "support@zentinelle.ai" }
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+keywords = ["ai", "agents", "governance", "llamaindex", "rag", "llm", "retrieval"]
+requires-python = ">=3.9"
+dependencies = [
+    "zentinelle>=0.1.0",
+    "llama-index>=0.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://zentinelle.ai"
+Documentation = "https://docs.zentinelle.ai/integrations/llamaindex"
+Repository = "https://github.com/zentinelle/zentinelle-python"
+
+[tool.hatch.build.targets.wheel]
+packages = ["zentinelle_llamaindex"]
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+
+[tool.ruff]
+line-length = 88
+select = ["E", "F", "I", "W"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true

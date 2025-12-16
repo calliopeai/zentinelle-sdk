@@ -1,0 +1,54 @@
+{
+  "name": "n8n-nodes-zentinelle",
+  "version": "0.1.0",
+  "description": "n8n nodes for Zentinelle AI Agent Governance",
+  "keywords": [
+    "n8n-community-node-package",
+    "zentinelle",
+    "ai",
+    "agents",
+    "governance",
+    "guardrails"
+  ],
+  "license": "Apache-2.0",
+  "homepage": "https://zentinelle.ai",
+  "author": {
+    "name": "Calliope Labs",
+    "email": "engineering@calliope.ai"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/calliopeai/zentinelle-sdk.git"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc && gulp build:icons",
+    "dev": "tsc --watch",
+    "lint": "eslint nodes credentials --ext .ts",
+    "prepublishOnly": "npm run build"
+  },
+  "files": [
+    "dist"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/ZentinelleApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/Zentinelle/Zentinelle.node.js",
+      "dist/nodes/ZentinelleGuardrail/ZentinelleGuardrail.node.js",
+      "dist/nodes/ZentinelleTrigger/ZentinelleTrigger.node.js"
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "gulp": "^4.0.2",
+    "n8n-workflow": "^1.0.0",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  }
+}

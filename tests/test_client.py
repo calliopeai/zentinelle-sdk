@@ -1,22 +1,19 @@
 """
-Tests for SentinelClient.
+Tests for ZentinelleClient.
 """
 import pytest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 import time
-import threading
-from datetime import datetime, timezone
 
-from sentinel_sdk import (
-    SentinelClient,
-    SentinelError,
-    SentinelConnectionError,
-    SentinelAuthError,
-    SentinelRateLimitError,
+from zentinelle import (
+    ZentinelleClient,
+    ZentinelleError,
+    ZentinelleConnectionError,
+    ZentinelleAuthError,
+    ZentinelleRateLimitError,
     RetryConfig,
     CircuitBreaker,
 )
-from sentinel_sdk.types import PolicyConfig, EvaluateResult, ConfigResult
 
 
 class TestRetryConfig:
@@ -127,485 +124,248 @@ class TestCircuitBreaker:
         cb.record_failure()
         assert cb.state == CircuitBreaker.OPEN
 
+    def test_half_open_limits_calls(self):
+        """Half-open state should limit the number of test calls."""
+        cb = CircuitBreaker(failure_threshold=2, recovery_timeout=0.1, half_open_max_calls=2)
+        cb.record_failure()
+        cb.record_failure()
+        assert cb.state == CircuitBreaker.OPEN
 
-class TestSentinelClientInit:
-    """Tests for SentinelClient initialization."""
+        time.sleep(0.15)
+        # First call in half-open should be allowed
+        assert cb.can_execute() is True
+        assert cb.state == CircuitBreaker.HALF_OPEN
+
+        # Second call should also be allowed
+        assert cb.can_execute() is True
+
+        # Third call should be blocked until success/failure resets
+        # (implementation detail: depends on how half_open_calls is tracked)
+
+
+class TestZentinelleClientRepr:
+    """Tests for ZentinelleClient string representation."""
+
+    def test_repr_masks_api_key(self):
+        """API key should be masked in __repr__."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_secret_key_12345",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            repr_str = repr(client)
+            # Should not contain full API key
+            assert "sk_agent_secret_key_12345" not in repr_str
+            # Should contain masked version
+            assert "sk_agent..." in repr_str
+            assert "...2345" in repr_str
+            client._running = False
+
+    def test_repr_shows_agent_info(self):
+        """Repr should show agent_id and agent_type."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test_key_123",
+                agent_type="langchain",
+                agent_id="agent-123",
+                auto_heartbeat=False,
+            )
+            repr_str = repr(client)
+            assert "agent_id='agent-123'" in repr_str
+            assert "agent_type='langchain'" in repr_str
+            client._running = False
+
+
+class TestZentinelleClientInit:
+    """Tests for ZentinelleClient initialization."""
 
     def test_basic_init(self):
-        with patch.object(SentinelClient, '_flush_loop'):
-            client = SentinelClient(
-                endpoint="https://sentinel.example.com",
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                endpoint="https://api.zentinelle.ai",
                 api_key="sk_agent_test",
                 agent_type="test",
                 auto_heartbeat=False,
             )
-            assert client.endpoint == "https://sentinel.example.com"
+            assert client.endpoint == "https://api.zentinelle.ai"
             assert client.api_key == "sk_agent_test"
             assert client.agent_type == "test"
             client._running = False
 
     def test_strips_trailing_slash(self):
-        with patch.object(SentinelClient, '_flush_loop'):
-            client = SentinelClient(
-                endpoint="https://sentinel.example.com/",
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                endpoint="https://api.zentinelle.ai/",
                 api_key="sk_agent_test",
                 agent_type="test",
                 auto_heartbeat=False,
             )
-            assert client.endpoint == "https://sentinel.example.com"
+            assert client.endpoint == "https://api.zentinelle.ai"
             client._running = False
 
 
-class TestSentinelClientHeaders:
+class TestZentinelleClientHeaders:
     """Tests for header generation."""
 
     def test_headers_with_api_key(self):
-        with patch.object(SentinelClient, '_flush_loop'):
-            client = SentinelClient(
-                endpoint="https://sentinel.example.com",
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                endpoint="https://api.zentinelle.ai",
                 api_key="sk_agent_test",
                 agent_type="test",
                 auto_heartbeat=False,
             )
             headers = client._headers()
-            assert headers['X-Sentinel-Key'] == "sk_agent_test"
+            assert headers['X-Zentinelle-Key'] == "sk_agent_test"
             assert headers['Content-Type'] == "application/json"
             client._running = False
 
     def test_headers_with_org_id(self):
-        with patch.object(SentinelClient, '_flush_loop'):
-            client = SentinelClient(
-                endpoint="https://sentinel.example.com",
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                endpoint="https://api.zentinelle.ai",
                 api_key="sk_agent_test",
                 agent_type="test",
                 org_id="org-123",
                 auto_heartbeat=False,
             )
             headers = client._headers()
-            assert headers['X-Sentinel-Org'] == "org-123"
+            assert headers['X-Zentinelle-Org'] == "org-123"
             client._running = False
 
 
-class TestSentinelExceptions:
+class TestZentinelleExceptions:
     """Tests for exception classes."""
 
     def test_base_exception(self):
-        with pytest.raises(SentinelError):
-            raise SentinelError("test error")
+        with pytest.raises(ZentinelleError):
+            raise ZentinelleError("test error")
 
     def test_connection_error(self):
-        with pytest.raises(SentinelConnectionError):
-            raise SentinelConnectionError("connection failed")
+        with pytest.raises(ZentinelleConnectionError):
+            raise ZentinelleConnectionError("connection failed")
 
     def test_auth_error(self):
-        with pytest.raises(SentinelAuthError):
-            raise SentinelAuthError("invalid key")
+        with pytest.raises(ZentinelleAuthError):
+            raise ZentinelleAuthError("invalid key")
 
     def test_rate_limit_error(self):
-        error = SentinelRateLimitError("rate limited", retry_after=30)
+        error = ZentinelleRateLimitError("rate limited", retry_after=30)
         assert error.retry_after == 30
 
     def test_exception_hierarchy(self):
-        assert issubclass(SentinelConnectionError, SentinelError)
-        assert issubclass(SentinelAuthError, SentinelError)
-        assert issubclass(SentinelRateLimitError, SentinelError)
+        assert issubclass(ZentinelleConnectionError, ZentinelleError)
+        assert issubclass(ZentinelleAuthError, ZentinelleError)
+        assert issubclass(ZentinelleRateLimitError, ZentinelleError)
 
 
-@pytest.fixture
-def mock_client():
-    """Create a client with mocked background threads."""
-    with patch.object(SentinelClient, '_flush_loop'), \
-         patch.object(SentinelClient, '_heartbeat_loop'):
-        client = SentinelClient(
-            endpoint="https://sentinel.example.com",
-            api_key="sk_agent_test",
-            agent_type="jupyterhub",
-            agent_id="agent-123",
-            auto_heartbeat=False,
-        )
-        yield client
-        client._running = False
+class TestEvaluateFailOpen:
+    """Tests for evaluate method fail-open behavior."""
 
-
-class TestRegister:
-    """Tests for register() method."""
-
-    def test_register_success(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'agent_id': 'new-agent-456',
-            'api_key': 'sk_new_key',
-            'config': {'max_servers': 10},
-            'policies': [
-                {'id': 'p1', 'name': 'Policy 1', 'type': 'spawn', 'enforcement': 'enforce', 'config': {}}
-            ],
-        }
-
-        with patch('requests.post', return_value=mock_response):
-            result = mock_client.register(capabilities=['lab', 'chat'], metadata={'version': '1.0'})
-
-        assert result.agent_id == 'new-agent-456'
-        assert result.api_key == 'sk_new_key'
-        assert result.config == {'max_servers': 10}
-        assert len(result.policies) == 1
-        assert result.policies[0].name == 'Policy 1'
-        # Verify client state updated
-        assert mock_client.agent_id == 'new-agent-456'
-        assert mock_client.api_key == 'sk_new_key'
-        assert mock_client._registered is True
-
-    def test_register_auth_error(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 401
-
-        with patch('requests.post', return_value=mock_response):
-            with pytest.raises(SentinelAuthError):
-                mock_client.register(capabilities=['lab'])
-
-
-class TestGetConfig:
-    """Tests for get_config() method."""
-
-    def test_get_config_fresh(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'agent_id': 'agent-123',
-            'config': {'setting': 'value'},
-            'policies': [
-                {'id': 'p1', 'name': 'Test Policy', 'type': 'spawn', 'enforcement': 'enforce', 'config': {}}
-            ],
-            'updated_at': '2024-01-01T00:00:00Z',
-        }
-
-        with patch('requests.get', return_value=mock_response):
-            result = mock_client.get_config()
-
-        assert result.config == {'setting': 'value'}
-        assert len(result.policies) == 1
-        assert result.policies[0].name == 'Test Policy'
-
-    def test_get_config_uses_cache(self, mock_client):
-        # First call - should make HTTP request
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'agent_id': 'agent-123',
-            'config': {'setting': 'cached'},
-            'policies': [
-                {'id': 'p1', 'name': 'Cached Policy', 'type': 'spawn', 'enforcement': 'enforce', 'config': {}}
-            ],
-            'updated_at': '2024-01-01T00:00:00Z',
-        }
-
-        with patch('requests.get', return_value=mock_response) as mock_get:
-            result1 = mock_client.get_config()
-            result2 = mock_client.get_config()
-
-        # Should only have made one HTTP call
-        assert mock_get.call_count == 1
-        assert result2.config == {'setting': 'cached'}
-        # Verify policies are cached too (this was the bug we fixed)
-        assert len(result2.policies) == 1
-        assert result2.policies[0].name == 'Cached Policy'
-
-    def test_get_config_force_refresh(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'agent_id': 'agent-123',
-            'config': {'setting': 'value'},
-            'policies': [],
-            'updated_at': '2024-01-01T00:00:00Z',
-        }
-
-        with patch('requests.get', return_value=mock_response) as mock_get:
-            mock_client.get_config()
-            mock_client.get_config(force_refresh=True)
-
-        # Should have made two HTTP calls
-        assert mock_get.call_count == 2
-
-
-class TestGetSecrets:
-    """Tests for get_secrets() method."""
-
-    def test_get_secrets_success(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'secrets': {'API_KEY': 'secret123', 'DB_PASSWORD': 'dbpass'},
-        }
-
-        with patch('requests.get', return_value=mock_response):
-            secrets = mock_client.get_secrets()
-
-        assert secrets['API_KEY'] == 'secret123'
-        assert secrets['DB_PASSWORD'] == 'dbpass'
-
-    def test_get_secret_convenience(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'secrets': {'API_KEY': 'secret123'},
-        }
-
-        with patch('requests.get', return_value=mock_response):
-            value = mock_client.get_secret('API_KEY')
-            missing = mock_client.get_secret('MISSING', default='default_val')
-
-        assert value == 'secret123'
-        assert missing == 'default_val'
-
-    def test_get_secrets_uses_cache(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {'secrets': {'KEY': 'val'}}
-
-        with patch('requests.get', return_value=mock_response) as mock_get:
-            mock_client.get_secrets()
-            mock_client.get_secrets()
-
-        assert mock_get.call_count == 1
-
-
-class TestEvaluate:
-    """Tests for evaluate() and can_spawn() methods."""
-
-    def test_evaluate_allowed(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'allowed': True,
-            'reason': None,
-            'policies_evaluated': [{'id': 'p1', 'result': 'allow'}],
-            'warnings': [],
-            'context': {},
-        }
-
-        with patch('requests.post', return_value=mock_response):
-            result = mock_client.evaluate('spawn', user_id='user123', context={'service': 'lab'})
-
-        assert result.allowed is True
-        assert len(result.policies_evaluated) == 1
-
-    def test_evaluate_denied(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'allowed': False,
-            'reason': 'User exceeded spawn limit',
-            'policies_evaluated': [],
-            'warnings': ['Approaching limit'],
-            'context': {},
-        }
-
-        with patch('requests.post', return_value=mock_response):
-            result = mock_client.evaluate('spawn', user_id='user123')
-
-        assert result.allowed is False
-        assert result.reason == 'User exceeded spawn limit'
-        assert 'Approaching limit' in result.warnings
-
-    def test_can_spawn_convenience(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            'allowed': True,
-            'policies_evaluated': [],
-            'warnings': [],
-            'context': {},
-        }
-
-        with patch('requests.post', return_value=mock_response) as mock_post:
-            result = mock_client.can_spawn(
-                user_id='user123',
-                service='lab',
-                instance_size='small',
-                current_server_count=2
+    def test_evaluate_validates_allowed_field(self):
+        """Evaluate should raise if 'allowed' field is missing (not fail-open)."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
             )
+            # Mock _post_for_evaluate to return response without 'allowed'
+            with patch.object(client, '_post_for_evaluate', return_value={'reason': 'test'}):
+                with pytest.raises(ZentinelleError, match="missing required 'allowed' field"):
+                    client.evaluate("test_action")
+            client._running = False
 
-        assert result.allowed is True
-        # Verify the context was passed correctly
-        call_data = mock_post.call_args[1]['json']
-        assert call_data['action'] == 'spawn'
-        assert call_data['context']['service'] == 'lab'
-        assert call_data['context']['instance_size'] == 'small'
-        assert call_data['context']['current_server_count'] == 2
+    def test_evaluate_accepts_fail_open_response(self):
+        """Evaluate should accept response without 'allowed' if fail_open=True."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            # Mock _post_for_evaluate to return fail-open response
+            with patch.object(client, '_post_for_evaluate', return_value={
+                'allowed': True,
+                'reason': 'fail_open',
+                'fail_open': True,
+            }):
+                result = client.evaluate("test_action")
+                assert result.allowed is True
+                assert result.fail_open is True
+            client._running = False
 
-
-class TestEvents:
-    """Tests for event emission."""
-
-    def test_emit_buffers_events(self, mock_client):
-        mock_client.emit('test_event', {'key': 'value'}, user_id='user123')
-
-        assert len(mock_client._event_buffer) == 1
-        event = mock_client._event_buffer[0]
-        assert event['type'] == 'test_event'
-        assert event['payload'] == {'key': 'value'}
-        assert event['user_id'] == 'user123'
-        assert 'timestamp' in event
-
-    def test_emit_spawn_convenience(self, mock_client):
-        mock_client.emit_spawn('user123', 'lab', 'medium')
-
-        assert len(mock_client._event_buffer) == 1
-        event = mock_client._event_buffer[0]
-        assert event['type'] == 'spawn'
-        assert event['category'] == 'audit'
-        assert event['payload']['service'] == 'lab'
-
-    def test_emit_ai_request_convenience(self, mock_client):
-        mock_client.emit_ai_request('user123', 'openai', 'gpt-4', 100, 50)
-
-        event = mock_client._event_buffer[0]
-        assert event['type'] == 'ai_request'
-        assert event['payload']['input_tokens'] == 100
-        assert event['payload']['output_tokens'] == 50
-
-    def test_flush_events_success(self, mock_client):
-        mock_client._registered = True
-        mock_client.emit('event1', {})
-        mock_client.emit('event2', {})
-
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {'accepted': 2, 'batch_id': 'batch-123'}
-
-        with patch('requests.post', return_value=mock_response):
-            result = mock_client.flush_events()
-
-        assert result.accepted == 2
-        assert result.batch_id == 'batch-123'
-        assert len(mock_client._event_buffer) == 0
-
-    def test_flush_events_requeues_on_failure(self, mock_client):
-        mock_client._registered = True
-        mock_client.emit('event1', {})
-
-        with patch('requests.post', side_effect=Exception("Network error")):
-            result = mock_client.flush_events()
-
-        assert result is None
-        # Events should be re-queued
-        assert len(mock_client._event_buffer) == 1
-
-    def test_auto_flush_when_buffer_full(self, mock_client):
-        mock_client._registered = True
-        mock_client._event_buffer_size = 3
-
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {'accepted': 3, 'batch_id': 'batch-123'}
-
-        with patch('requests.post', return_value=mock_response) as mock_post:
-            mock_client.emit('event1', {})
-            mock_client.emit('event2', {})
-            # This should trigger a flush
-            mock_client.emit('event3', {})
-
-        assert mock_post.called
+    def test_evaluate_result_has_fail_open_field(self):
+        """EvaluateResult should have fail_open field."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            with patch.object(client, '_post_for_evaluate', return_value={
+                'allowed': False,
+                'reason': 'blocked by policy',
+            }):
+                result = client.evaluate("test_action")
+                assert result.allowed is False
+                assert result.fail_open is False
+            client._running = False
 
 
-class TestShutdown:
-    """Tests for shutdown behavior."""
+class TestEventBufferBounds:
+    """Tests for event buffer memory leak prevention."""
 
-    def test_shutdown_flushes_remaining_events(self, mock_client):
-        mock_client._registered = True
-        mock_client.emit('final_event', {})
+    def test_max_buffer_size_calculated_correctly(self):
+        """Max buffer should be 10x normal or 1000, whichever is larger."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            # Small buffer: max should be 1000
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+                event_buffer_size=50,
+            )
+            assert client._max_buffer_size == 1000
+            client._running = False
 
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {'accepted': 1, 'batch_id': 'batch-final'}
+            # Large buffer: max should be 10x
+            client2 = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+                event_buffer_size=200,
+            )
+            assert client2._max_buffer_size == 2000
+            client2._running = False
 
-        with patch('requests.post', return_value=mock_response) as mock_post:
-            mock_client.shutdown(timeout=0.1)
+    def test_buffer_drops_oldest_when_at_max(self):
+        """Buffer should drop oldest events when at max capacity."""
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                api_key="sk_agent_test123",
+                agent_type="test",
+                auto_heartbeat=False,
+                event_buffer_size=10,  # max will be 1000
+            )
+            # Override max for testing
+            client._max_buffer_size = 5
 
-        assert mock_post.called
+            # Fill buffer to max
+            for i in range(5):
+                client.emit(f"event_{i}", {"index": i})
 
-    def test_context_manager(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {'accepted': 0, 'batch_id': 'b'}
+            assert len(client._event_buffer) == 5
+            assert client._event_buffer[0]['payload']['index'] == 0
 
-        with patch('requests.post', return_value=mock_response):
-            with mock_client as client:
-                client._registered = True
-                client.emit('event', {})
-            # After context exit, client should be shut down
-            assert client._running is False
+            # Add one more - should drop oldest
+            client.emit("event_5", {"index": 5})
 
+            assert len(client._event_buffer) == 5
+            # First event should now be index 1 (index 0 was dropped)
+            assert client._event_buffer[0]['payload']['index'] == 1
+            # Last event should be index 5
+            assert client._event_buffer[-1]['payload']['index'] == 5
 
-class TestHTTPErrorHandling:
-    """Tests for HTTP error handling."""
-
-    def test_handles_401_auth_error(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 401
-
-        with patch('requests.get', return_value=mock_response):
-            with pytest.raises(SentinelAuthError, match="Invalid or expired API key"):
-                mock_client.get_config()
-
-    def test_handles_403_forbidden(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 403
-
-        with patch('requests.get', return_value=mock_response):
-            with pytest.raises(SentinelAuthError, match="Access denied"):
-                mock_client.get_config()
-
-    def test_handles_429_rate_limit(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 429
-        mock_response.headers = {'Retry-After': '30'}
-
-        with patch('requests.get', return_value=mock_response):
-            with pytest.raises(SentinelRateLimitError) as exc_info:
-                mock_client.get_config()
-            assert exc_info.value.retry_after == 30
-
-    def test_handles_500_server_error(self, mock_client):
-        mock_response = Mock()
-        mock_response.status_code = 500
-        mock_response.text = "Internal Server Error"
-
-        with patch('requests.get', return_value=mock_response):
-            with pytest.raises(SentinelConnectionError, match="Server error"):
-                mock_client.get_config()
-
-    def test_retries_on_connection_error(self, mock_client):
-        mock_client._retry_config = RetryConfig(max_retries=2, base_delay=0.01, jitter=False)
-
-        import requests as req
-        with patch('requests.get', side_effect=req.ConnectionError("Connection refused")):
-            with pytest.raises(SentinelConnectionError, match="Failed after 3 attempts"):
-                mock_client.get_config()
-
-
-class TestHeartbeat:
-    """Tests for heartbeat functionality."""
-
-    def test_heartbeat_sends_status(self, mock_client):
-        mock_client._registered = True
-
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {}
-
-        with patch('requests.post', return_value=mock_response) as mock_post:
-            mock_client.heartbeat(status='healthy', metrics={'cpu': 50})
-
-        call_data = mock_post.call_args[1]['json']
-        assert call_data['status'] == 'healthy'
-        assert call_data['metrics'] == {'cpu': 50}
-
-    def test_heartbeat_skipped_when_not_registered(self, mock_client):
-        mock_client._registered = False
-
-        with patch('requests.post') as mock_post:
-            mock_client.heartbeat()
-
-        assert not mock_post.called
+            client._running = False

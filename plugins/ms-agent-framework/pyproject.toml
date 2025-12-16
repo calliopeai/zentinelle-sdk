@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zentinelle-ms-agent"
+version = "0.1.0"
+description = "Zentinelle integration for Microsoft Agent Framework - AI Agent Governance"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+    { name = "Calliope Labs", email = "engineering@calliope.ai" }
+]
+keywords = [
+    "microsoft",
+    "agent-framework",
+    "semantic-kernel",
+    "ai",
+    "agents",
+    "governance",
+    "guardrails",
+    "zentinelle",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "zentinelle>=0.1.0",
+    "agent-framework-core>=0.1.0",
+]
+
+[project.optional-dependencies]
+azure = ["agent-framework-azure-ai>=0.1.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "agent-framework>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://zentinelle.ai"
+Documentation = "https://docs.zentinelle.ai/integrations/microsoft-agent-framework"
+Repository = "https://github.com/calliopeai/zentinelle-sdk"
+MSAgentFramework = "https://github.com/microsoft/agent-framework"
+
+[tool.hatch.build.targets.wheel]
+packages = ["zentinelle_ms_agent"]

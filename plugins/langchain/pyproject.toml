@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zentinelle-langchain"
+version = "0.1.0"
+description = "Zentinelle integration for LangChain - AI Agent Governance"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.9"
+authors = [
+    { name = "Calliope Labs", email = "engineering@calliope.ai" }
+]
+keywords = [
+    "langchain",
+    "ai",
+    "agents",
+    "governance",
+    "guardrails",
+    "zentinelle",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "zentinelle>=0.1.0",
+    "langchain-core>=0.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "langchain>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://zentinelle.ai"
+Documentation = "https://docs.zentinelle.ai/integrations/langchain"
+Repository = "https://github.com/calliopeai/zentinelle-sdk"
+
+[tool.hatch.build.targets.wheel]
+packages = ["zentinelle_langchain"]
