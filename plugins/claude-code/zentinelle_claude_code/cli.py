@@ -2,10 +2,11 @@
 zentinelle-claude-code CLI
 
 Commands:
-  install   Write Zentinelle hooks to .claude/settings.json
-  uninstall Remove Zentinelle hooks from .claude/settings.json
-  proxy     Start local header-injecting proxy server
-  status    Show current installation state
+  install        Write Zentinelle hooks to .claude/settings.json
+  uninstall      Remove Zentinelle hooks from .claude/settings.json
+  proxy          Start local header-injecting proxy server
+  status         Show current installation state
+  install-skill  Install /zentinelle slash command into Claude Code
 
 Usage:
   zentinelle-claude-code install \\
@@ -16,6 +17,9 @@ Usage:
   zentinelle-claude-code proxy \\
     --endpoint http://localhost:8000 \\
     --key sk_agent_...
+
+  zentinelle-claude-code install-skill
+  # then: /zentinelle in Claude Code
 
   ZENTINELLE_ENDPOINT=http://localhost:8000 \\
   ZENTINELLE_KEY=sk_agent_... \\
@@ -130,6 +134,40 @@ def cmd_status(args):
                 print(f"  {event}: endpoint={endpoint} agent_id={agent_id}")
 
 
+def cmd_install_skill(args):
+    import shutil
+    from pathlib import Path
+
+    # Skill source: bundled with this package
+    here = Path(__file__).parent
+    skill_src = here / "skill" / "SKILL.md"
+    if not skill_src.exists():
+        print(f"Error: skill file not found at {skill_src}", file=sys.stderr)
+        sys.exit(1)
+
+    # Destination: user-level skill (available in every project)
+    # or project-level (current directory only)
+    if args.project:
+        dest_dir = Path(args.project_dir or os.getcwd()) / ".claude" / "skills" / "zentinelle"
+        scope = "project"
+    else:
+        dest_dir = Path.home() / ".claude" / "skills" / "zentinelle"
+        scope = "user"
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest_file = dest_dir / "SKILL.md"
+    shutil.copy2(skill_src, dest_file)
+
+    print(f"Zentinelle skill installed ({scope}-level): {dest_file}")
+    print()
+    print("In Claude Code, type:")
+    print("  /zentinelle          — guided setup (hooks mode)")
+    print("  /zentinelle proxy    — set up proxy mode")
+    print("  /zentinelle both     — hooks + proxy")
+    print("  /zentinelle status   — show current state")
+    print("  /zentinelle uninstall")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="zentinelle-claude-code",
@@ -166,6 +204,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = sub.add_parser("status", help="Show Zentinelle hook installation state")
     p_status.add_argument("--project-dir", dest="project_dir", help="Project root (default: cwd)")
     p_status.set_defaults(func=cmd_status)
+
+    # install-skill
+    p_skill = sub.add_parser(
+        "install-skill",
+        help="Install /zentinelle slash command into Claude Code (~/.claude/skills/)",
+    )
+    p_skill.add_argument(
+        "--project", action="store_true",
+        help="Install into .claude/skills/ of current project instead of ~/.claude/skills/",
+    )
+    p_skill.add_argument("--project-dir", dest="project_dir", help="Project root (default: cwd)")
+    p_skill.set_defaults(func=cmd_install_skill)
 
     return parser
 

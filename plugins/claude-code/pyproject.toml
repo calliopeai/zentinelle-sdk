@@ -53,3 +53,6 @@ Repository = "https://github.com/calliopeai/zentinelle-sdk"
 
 [tool.hatch.build.targets.wheel]
 packages = ["zentinelle_claude_code"]
+
+[tool.hatch.build.targets.wheel.sources]
+"zentinelle_claude_code/skill" = "zentinelle_claude_code/skill"
