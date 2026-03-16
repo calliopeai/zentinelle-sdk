@@ -127,7 +127,7 @@ class ProxyServer:
         port: int = _DEFAULT_PORT,
         host: str = "127.0.0.1",
     ):
-        self.zentinelle_endpoint = zentinelle_endpoint.rstrip("/") + "/zentinelle/proxy/anthropic"
+        self.zentinelle_endpoint = zentinelle_endpoint.rstrip("/") + "/proxy/anthropic"
         self.zentinelle_key = zentinelle_key
         self.port = port
         self.host = host
