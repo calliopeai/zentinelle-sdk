@@ -69,12 +69,45 @@ def cmd_install(args):
     print("Restart Claude Code to activate hooks.")
 
 
+def cmd_install_gemini(args):
+    from zentinelle_agent.hooks.gemini import install_gemini_hooks
+
+    endpoint = _require("endpoint", args.endpoint, "ZENTINELLE_ENDPOINT")
+    key = _require("key", args.key, "ZENTINELLE_KEY")
+    agent_id = args.agent_id or os.environ.get("ZENTINELLE_AGENT_ID", "gemini-cli")
+    project_dir = args.project_dir or os.getcwd()
+
+    settings_path = install_gemini_hooks(
+        project_dir=project_dir,
+        endpoint=endpoint,
+        api_key=key,
+        agent_id=agent_id,
+        fail_open=args.fail_open,
+    )
+
+    print(f"Zentinelle Gemini hooks installed: {settings_path}")
+    print()
+    print(f"  Endpoint : {endpoint}")
+    print(f"  Agent ID : {agent_id}")
+    print(f"  Fail open: {args.fail_open}")
+    print()
+    print("Gemini CLI hooks are active for this project.")
+
+
 def cmd_uninstall(args):
     from zentinelle_agent.hooks.install import uninstall_hooks
 
     project_dir = args.project_dir or os.getcwd()
     settings_path = uninstall_hooks(project_dir=project_dir)
     print(f"Zentinelle hooks removed from: {settings_path}")
+
+
+def cmd_uninstall_gemini(args):
+    from zentinelle_agent.hooks.gemini import uninstall_gemini_hooks
+
+    project_dir = args.project_dir or os.getcwd()
+    settings_path = uninstall_gemini_hooks(project_dir=project_dir)
+    print(f"Zentinelle Gemini hooks removed from: {settings_path}")
 
 
 def cmd_proxy(args):
@@ -192,6 +225,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_uninstall = sub.add_parser("uninstall", help="Remove Zentinelle hooks")
     p_uninstall.add_argument("--project-dir", dest="project_dir", help="Project root (default: cwd)")
     p_uninstall.set_defaults(func=cmd_uninstall)
+
+    # install-gemini
+    p_install_gemini = sub.add_parser("install-gemini", help="Install Zentinelle hooks into .gemini/settings.json")
+    p_install_gemini.add_argument("--endpoint", help="Zentinelle base URL (or ZENTINELLE_ENDPOINT)")
+    p_install_gemini.add_argument("--key", help="Zentinelle agent API key (or ZENTINELLE_KEY)")
+    p_install_gemini.add_argument("--agent-id", dest="agent_id", help="Agent identifier (default: gemini-cli)")
+    p_install_gemini.add_argument("--project-dir", dest="project_dir", help="Project root (default: cwd)")
+    p_install_gemini.add_argument("--fail-open", dest="fail_open", action="store_true",
+                                  help="Allow tool calls when Zentinelle is unreachable")
+    p_install_gemini.set_defaults(func=cmd_install_gemini)
+
+    # uninstall-gemini
+    p_uninstall_gemini = sub.add_parser("uninstall-gemini", help="Remove Zentinelle Gemini hooks")
+    p_uninstall_gemini.add_argument("--project-dir", dest="project_dir", help="Project root (default: cwd)")
+    p_uninstall_gemini.set_defaults(func=cmd_uninstall_gemini)
 
     # proxy
     p_proxy = sub.add_parser("proxy", help="Start local proxy (for full API-level enforcement)")

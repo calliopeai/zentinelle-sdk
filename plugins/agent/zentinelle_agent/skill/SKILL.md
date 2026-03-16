@@ -39,14 +39,24 @@ If any are missing, ask the user:
 
 **3. Execute based on mode**
 
-**`hooks`** (default — installs PreToolUse/PostToolUse hooks, Claude Code only):
+**`hooks`** (default — installs PreToolUse/PostToolUse hooks, Claude Code and Gemini CLI supported):
+
+For Claude Code:
 ```bash
 zentinelle-agent install \
   --endpoint <endpoint> \
   --key <key> \
   --agent-id <agent-id>
 ```
-Tell the user: hooks are active after restarting Claude Code.
+
+For Gemini CLI:
+```bash
+zentinelle-agent install-gemini \
+  --endpoint <endpoint> \
+  --key <key> \
+  --agent-id <agent-id>
+```
+Tell the user: hooks are active after restarting the CLI.
 
 **`proxy`** (full API-level enforcement — works with any agent):
 Ask the user which provider they're using, then show these steps:
@@ -62,7 +72,7 @@ zentinelle-agent proxy \
 Step B — point the agent at the proxy:
 - **Claude Code**: `export ANTHROPIC_BASE_URL=http://127.0.0.1:8742`
 - **Codex (OpenAI)**: `export OPENAI_BASE_URL=http://127.0.0.1:8742`
-- **Gemini**: `export GOOGLE_API_BASE=http://127.0.0.1:8742`
+- **Gemini**: Note that Gemini SDKs require programmatic configuration (see `README.md`). `export GOOGLE_API_BASE` is generally not supported natively.
 
 **`both`** — do hooks first, then show proxy instructions.
 

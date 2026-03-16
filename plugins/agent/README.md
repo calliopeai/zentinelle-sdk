@@ -49,13 +49,30 @@ codex
 
 ### Gemini
 
+**Mode A: Hooks (recommended for tool-level enforcement)**
+```bash
+zentinelle-agent install-gemini \
+  --endpoint http://localhost:8080 \
+  --key sk_agent_your_key \
+  --agent-id gemini-cli-dev
+```
+Restart your Gemini CLI session to activate.
+
+**Mode B: Proxy (API-level enforcement)**
 ```bash
 # Start the proxy
 zentinelle-agent proxy --endpoint http://localhost:8080 --key sk_agent_your_key --provider google
-# Then in another terminal:
-export GOOGLE_API_BASE=http://127.0.0.1:8742
-# Launch your Gemini agent
 ```
+> **Note:** The official Google Generative AI SDKs do **not** natively respect `GOOGLE_API_BASE`. To use the proxy, you must initialize your client programmatically:
+> ```python
+> # Python
+> genai.configure(api_key=..., client_options={"api_endpoint": "http://127.0.0.1:8742"})
+> ```
+> ```javascript
+> // Node.js
+> const genAI = new GoogleGenerativeAI(apiKey);
+> const model = genAI.getGenerativeModel({ model: "...", baseUrl: "http://127.0.0.1:8742" });
+> ```
 
 ---
 
