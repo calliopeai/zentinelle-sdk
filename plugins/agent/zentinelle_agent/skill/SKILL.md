@@ -1,11 +1,11 @@
 ---
 name: zentinelle
-description: Set up Zentinelle AI governance for this Claude Code session — hooks (tool-level policy enforcement + audit) and/or proxy (full API-level enforcement).
+description: Set up Zentinelle AI governance for this coding agent session — hooks (tool-level policy enforcement + audit) and/or proxy (full API-level enforcement).
 argument-hint: "[hooks|proxy|both|status|uninstall]"
 disable-model-invocation: true
 ---
 
-Set up Zentinelle governance for this Claude Code session.
+Set up Zentinelle governance for this coding agent session.
 
 Mode: $ARGUMENTS (default: hooks)
 
@@ -15,12 +15,12 @@ Mode: $ARGUMENTS (default: hooks)
 
 Run this and check if it succeeds:
 ```bash
-pip show zentinelle-claude-code
+pip show zentinelle-agent
 ```
 
 If not installed:
 ```bash
-pip install zentinelle-claude-code
+pip install zentinelle-agent
 ```
 
 **2. Collect configuration**
@@ -33,48 +33,50 @@ echo "AGENT_ID: ${ZENTINELLE_AGENT_ID:-not set}"
 ```
 
 If any are missing, ask the user:
-- **Endpoint**: URL of their Zentinelle instance (e.g. `http://localhost:8000` for local, or their hosted URL)
-- **Key**: Agent API key (starts with `sk_agent_`, `znt_`, or `sk_test_`)
-- **Agent ID**: A label for this session (default: `claude-code`, can be anything descriptive)
+- **Endpoint**: URL of their Zentinelle instance (e.g. `http://localhost:8080` for local, or their hosted URL)
+- **Key**: Agent API key (starts with `sk_agent_`)
+- **Agent ID**: A label for this session (e.g. `claude-code-dev`, `codex-dev`, `gemini-dev`)
 
 **3. Execute based on mode**
 
-**`hooks`** (default — installs PreToolUse/PostToolUse hooks):
+**`hooks`** (default — installs PreToolUse/PostToolUse hooks, Claude Code only):
 ```bash
-zentinelle-claude-code install \
+zentinelle-agent install \
   --endpoint <endpoint> \
   --key <key> \
   --agent-id <agent-id>
 ```
 Tell the user: hooks are active after restarting Claude Code.
 
-**`proxy`** (full API-level enforcement):
-Show the user these two steps:
+**`proxy`** (full API-level enforcement — works with any agent):
+Ask the user which provider they're using, then show these steps:
 
 Step A — start the proxy (run in a separate terminal):
 ```bash
-ZENTINELLE_ENDPOINT=<endpoint> ZENTINELLE_KEY=<key> \
-  zentinelle-claude-code proxy
+zentinelle-agent proxy \
+  --endpoint <endpoint> \
+  --key <key> \
+  --provider <anthropic|openai|google>
 ```
 
-Step B — point Claude Code at it (in the terminal where they launch `claude`):
-```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8742
-```
+Step B — point the agent at the proxy:
+- **Claude Code**: `export ANTHROPIC_BASE_URL=http://127.0.0.1:8742`
+- **Codex (OpenAI)**: `export OPENAI_BASE_URL=http://127.0.0.1:8742`
+- **Gemini**: `export GOOGLE_API_BASE=http://127.0.0.1:8742`
 
 **`both`** — do hooks first, then show proxy instructions.
 
 **`status`** — show current installation state:
 ```bash
-zentinelle-claude-code status
+zentinelle-agent status
 ```
 
 **`uninstall`** — remove hooks:
 ```bash
-zentinelle-claude-code uninstall
+zentinelle-agent uninstall
 ```
 
 **4. Confirm**
 
-After setup, run `zentinelle-claude-code status` and show the user what's active.
+After setup, run `zentinelle-agent status` and show the user what's active.
 Summarize in one sentence what enforcement is now in place.

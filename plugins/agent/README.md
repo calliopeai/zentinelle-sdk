@@ -1,59 +1,78 @@
-# zentinelle-claude-code
+# zentinelle-agent
 
-Zentinelle governance integration for [Claude Code](https://claude.ai/code) sessions.
+Zentinelle governance integration for AI coding agents — Claude Code, Codex, Gemini, and any OpenAI/Anthropic/Google-compatible agent.
 
 Two complementary modes — use one or both:
 
-| Mode | What it does | Enforcement level |
-|------|-------------|-------------------|
-| **Hooks** | Intercepts every tool call via Claude Code's PreToolUse/PostToolUse hooks | Tool-level (can block individual tool calls) |
-| **Proxy** | Routes all Anthropic API calls through Zentinelle | API-level (full policy enforcement before any request reaches Anthropic) |
+| Mode | What it does | Works with |
+|------|-------------|------------|
+| **Hooks** | Intercepts every tool call via PreToolUse/PostToolUse hooks | Claude Code |
+| **Proxy** | Routes all LLM API calls through Zentinelle for policy enforcement | Any agent (Claude Code, Codex, Gemini, custom) |
 
 ---
 
 ## Installation
 
 ```bash
-pip install zentinelle-claude-code
+pip install zentinelle-agent
 ```
 
 ---
 
-## Hooks mode
+## Quick start by agent
+
+### Claude Code
+
+```bash
+# Option A: Hooks (tool-level enforcement)
+zentinelle-agent install \
+  --endpoint http://localhost:8080 \
+  --key sk_agent_your_key \
+  --agent-id claude-code-dev
+
+# Option B: Proxy (API-level enforcement)
+zentinelle-agent proxy --endpoint http://localhost:8080 --key sk_agent_your_key --provider anthropic
+# Then in another terminal:
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8742
+claude
+```
+
+### Codex (OpenAI)
+
+```bash
+# Start the proxy
+zentinelle-agent proxy --endpoint http://localhost:8080 --key sk_agent_your_key --provider openai
+# Then in another terminal:
+export OPENAI_BASE_URL=http://127.0.0.1:8742
+codex
+```
+
+### Gemini
+
+```bash
+# Start the proxy
+zentinelle-agent proxy --endpoint http://localhost:8080 --key sk_agent_your_key --provider google
+# Then in another terminal:
+export GOOGLE_API_BASE=http://127.0.0.1:8742
+# Launch your Gemini agent
+```
+
+---
+
+## Hooks mode (Claude Code only)
 
 Hooks intercept tool calls at the Claude Code layer:
 
-- **PreToolUse** — calls `/api/zentinelle/v1/evaluate` before every tool invocation. If Zentinelle blocks the action (exit code 2), Claude Code shows the reason to the user and does not execute the tool.
+- **PreToolUse** — calls `/api/zentinelle/v1/evaluate` before every tool invocation. If Zentinelle blocks the action (exit code 2), Claude Code shows the reason and skips the tool.
 - **PostToolUse** — emits an audit event to `/api/zentinelle/v1/events` after every tool call. Fire-and-forget, never blocks.
 
 ### Setup
 
 ```bash
-zentinelle-claude-code install \
-  --endpoint http://localhost:8000 \
+zentinelle-agent install \
+  --endpoint http://localhost:8080 \
   --key sk_agent_your_key_here \
-  --agent-id my-claude-session
-```
-
-This writes hooks into `.claude/settings.json` in your current directory:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "ZENTINELLE_ENDPOINT='http://localhost:8000' ZENTINELLE_KEY='sk_agent_...' ZENTINELLE_AGENT_ID='my-claude-session' python3 '/path/to/pre_tool.py'"
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [...]
-  }
-}
+  --agent-id my-agent
 ```
 
 Restart Claude Code to activate.
@@ -66,96 +85,55 @@ Restart Claude Code to activate.
 --agent-id      Agent identifier   (default: claude-code)
 --project-dir   Target project directory (default: current directory)
 --fail-open     Allow tool calls when Zentinelle is unreachable
-                (default: block when unreachable for safety)
 --mode          both | pre | post  (default: both)
 ```
 
-### Uninstall
+### Uninstall / Status
 
 ```bash
-zentinelle-claude-code uninstall
-```
-
-### Check status
-
-```bash
-zentinelle-claude-code status
+zentinelle-agent uninstall
+zentinelle-agent status
 ```
 
 ---
 
-## Proxy mode
+## Proxy mode (all agents)
 
-The proxy routes all Anthropic API calls through Zentinelle before they reach `api.anthropic.com`. Zentinelle evaluates policies (model restrictions, budget limits, content filters, etc.) on every request.
+The proxy routes all LLM API calls through Zentinelle for policy enforcement before they reach the upstream provider.
 
 ```
-Claude Code → http://127.0.0.1:8742 → Zentinelle proxy → api.anthropic.com
-               (local proxy)            /zentinelle/proxy/anthropic/
+Agent → http://127.0.0.1:8742 → Zentinelle /proxy/<provider>/ → provider API
+         (local proxy)           (policy evaluation)
 ```
 
 ### Start the proxy
 
 ```bash
-zentinelle-claude-code proxy \
-  --endpoint http://localhost:8000 \
-  --key sk_agent_your_key_here
+zentinelle-agent proxy \
+  --endpoint http://localhost:8080 \
+  --key sk_agent_your_key_here \
+  --provider anthropic   # or openai, google
 ```
 
-Output:
-```
-Zentinelle proxy started on http://127.0.0.1:8742
-Forwarding to: http://localhost:8000/zentinelle/proxy/anthropic
+### Supported providers
 
-Configure Claude Code:
-  export ANTHROPIC_BASE_URL=http://127.0.0.1:8742
-```
-
-In a new terminal (or added to your shell profile):
-
-```bash
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8742
-claude  # or continue your existing Claude Code session
-```
-
-### Options
-
-```
---endpoint      Zentinelle base URL (or ZENTINELLE_ENDPOINT env var)
---key           Agent API key      (or ZENTINELLE_KEY env var)
---port          Local proxy port   (default: 8742)
---host          Bind address       (default: 127.0.0.1)
-```
+| Provider | Upstream | Agent env var |
+|----------|----------|---------------|
+| `anthropic` | api.anthropic.com | `ANTHROPIC_BASE_URL` |
+| `openai` | api.openai.com | `OPENAI_BASE_URL` |
+| `google` | generativelanguage.googleapis.com | `GOOGLE_API_BASE` |
 
 ### How it works
 
-The proxy:
-1. Receives the request from Claude Code (which includes your real `Authorization: Bearer sk-ant-...` header)
-2. Injects `X-Zentinelle-Key: <your-agent-key>` to identify the agent
-3. Forwards to `{ZENTINELLE_ENDPOINT}/zentinelle/proxy/anthropic/`
-4. Zentinelle strips `X-Zentinelle-Key`, evaluates policies, and proxies to `api.anthropic.com`
+1. Receives the request from your agent (with the real provider API key)
+2. Injects `X-Zentinelle-Key` to identify the agent
+3. Forwards to Zentinelle's proxy endpoint
+4. Zentinelle evaluates policies (rate limits, model restrictions, content filters)
 5. Streams the response back (SSE/streaming supported)
 
 ---
 
-## Using both modes together
-
-Hooks give you tool-call-level observability and blocking. The proxy gives you API-level enforcement. They complement each other well:
-
-```bash
-# Terminal 1: start the proxy
-zentinelle-claude-code proxy --endpoint http://localhost:8000 --key sk_agent_...
-
-# Terminal 2: install hooks and point Claude Code at the proxy
-zentinelle-claude-code install --endpoint http://localhost:8000 --key sk_agent_...
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8742
-claude
-```
-
----
-
 ## Environment variables
-
-All options can be set via environment variables:
 
 | Variable | Description |
 |----------|-------------|
@@ -170,5 +148,4 @@ All options can be set via environment variables:
 
 - Python 3.9+
 - `httpx>=0.24.0` (for proxy streaming)
-- Claude Code CLI
 - A running Zentinelle instance
