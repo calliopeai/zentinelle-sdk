@@ -1,5 +1,5 @@
 """
-zentinelle-claude-code CLI
+zentinelle-agent CLI
 
 Commands:
   install        Write Zentinelle hooks to .claude/settings.json
@@ -9,21 +9,21 @@ Commands:
   install-skill  Install /zentinelle slash command into Claude Code
 
 Usage:
-  zentinelle-claude-code install \\
+  zentinelle-agent install \\
     --endpoint http://localhost:8000 \\
     --key sk_agent_... \\
-    --agent-id my-claude-session
+    --agent-id my-agent
 
-  zentinelle-claude-code proxy \\
+  zentinelle-agent proxy \\
     --endpoint http://localhost:8000 \\
-    --key sk_agent_...
+    --key sk_agent_... \\
+    --provider openai
 
-  zentinelle-claude-code install-skill
-  # then: /zentinelle in Claude Code
+  zentinelle-agent install-skill
 
   ZENTINELLE_ENDPOINT=http://localhost:8000 \\
   ZENTINELLE_KEY=sk_agent_... \\
-  zentinelle-claude-code install
+  zentinelle-agent install
 """
 import argparse
 import json
@@ -43,7 +43,7 @@ def _require(name: str, value: str | None, env_var: str) -> str:
 
 
 def cmd_install(args):
-    from zentinelle_claude_code.hooks.install import install_hooks
+    from zentinelle_agent.hooks.install import install_hooks
 
     endpoint = _require("endpoint", args.endpoint, "ZENTINELLE_ENDPOINT")
     key = _require("key", args.key, "ZENTINELLE_KEY")
@@ -70,7 +70,7 @@ def cmd_install(args):
 
 
 def cmd_uninstall(args):
-    from zentinelle_claude_code.hooks.install import uninstall_hooks
+    from zentinelle_agent.hooks.install import uninstall_hooks
 
     project_dir = args.project_dir or os.getcwd()
     settings_path = uninstall_hooks(project_dir=project_dir)
@@ -78,7 +78,7 @@ def cmd_uninstall(args):
 
 
 def cmd_proxy(args):
-    from zentinelle_claude_code.proxy import run_proxy
+    from zentinelle_agent.proxy import run_proxy
 
     endpoint = _require("endpoint", args.endpoint, "ZENTINELLE_ENDPOINT")
     key = _require("key", args.key, "ZENTINELLE_KEY")
@@ -88,6 +88,7 @@ def cmd_proxy(args):
     run_proxy(
         zentinelle_endpoint=endpoint,
         zentinelle_key=key,
+        provider=args.provider,
         port=port,
         host=host,
     )
@@ -170,8 +171,8 @@ def cmd_install_skill(args):
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="zentinelle-claude-code",
-        description="Zentinelle governance for Claude Code sessions",
+        prog="zentinelle-agent",
+        description="Zentinelle governance for AI coding agents",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -196,6 +197,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_proxy = sub.add_parser("proxy", help="Start local proxy (for full API-level enforcement)")
     p_proxy.add_argument("--endpoint", help="Zentinelle base URL (or ZENTINELLE_ENDPOINT)")
     p_proxy.add_argument("--key", help="Zentinelle agent API key (or ZENTINELLE_KEY)")
+    p_proxy.add_argument(
+        "--provider",
+        choices=("anthropic", "openai", "google"),
+        default="anthropic",
+        help="Provider proxy target (default: anthropic)",
+    )
     p_proxy.add_argument("--port", type=int, default=8742, help="Local proxy port (default: 8742)")
     p_proxy.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
     p_proxy.set_defaults(func=cmd_proxy)

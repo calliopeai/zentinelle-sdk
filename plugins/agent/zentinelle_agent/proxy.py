@@ -1,17 +1,17 @@
 """
 Zentinelle proxy server for Claude Code.
 
-Sits between Claude Code and the Anthropic API:
+Sits between Claude Code and a provider API:
 
   Claude Code  →  http://127.0.0.1:PORT  →  Zentinelle proxy endpoint
                                               (adds X-Zentinelle-Key header)
-                                              → /zentinelle/proxy/anthropic/
+                                              → /zentinelle/proxy/<provider>/
 
 Configure Claude Code:
-  export ANTHROPIC_BASE_URL=http://127.0.0.1:PORT
+  export <PROVIDER_BASE_URL>=http://127.0.0.1:PORT
 
 The Zentinelle backend proxy strips X-Zentinelle-Key for agent identification,
-evaluates policies, and forwards clean requests to api.anthropic.com.
+evaluates policies, and forwards clean requests to the provider API.
 """
 import os
 import sys
@@ -28,15 +28,21 @@ _DEFAULT_PORT = 8742
 _CONNECT_TIMEOUT = 10.0
 _READ_TIMEOUT = 300.0  # Long — Claude can take a while
 
+_PROVIDER_ENV_VARS = {
+    "anthropic": "ANTHROPIC_BASE_URL",
+    "openai": "OPENAI_BASE_URL",
+    "google": "GOOGLE_API_BASE",
+}
+
 
 class ProxyHandler(BaseHTTPRequestHandler):
     """
     HTTP handler that forwards requests to the Zentinelle proxy endpoint,
     injecting the X-Zentinelle-Key header for agent identification.
 
-    The Zentinelle endpoint (/zentinelle/proxy/anthropic/) is a transparent
+    The Zentinelle endpoint (/zentinelle/proxy/<provider>/) is a transparent
     passthrough: it strips X-Zentinelle-Key, identifies the agent, evaluates
-    policies, then forwards the request to api.anthropic.com.
+    policies, then forwards the request to the provider API.
 
     SSE streaming is handled by chunked transfer to the client.
     """
@@ -118,16 +124,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
 
 class ProxyServer:
-    """Local proxy server that injects Zentinelle credentials into Anthropic API calls."""
+    """Local proxy server that injects Zentinelle credentials into provider API calls."""
 
     def __init__(
         self,
         zentinelle_endpoint: str,
         zentinelle_key: str,
+        provider: str = "anthropic",
         port: int = _DEFAULT_PORT,
         host: str = "127.0.0.1",
     ):
-        self.zentinelle_endpoint = zentinelle_endpoint.rstrip("/") + "/proxy/anthropic"
+        self.provider = provider
+        self.zentinelle_endpoint = zentinelle_endpoint.rstrip("/") + f"/proxy/{provider}"
         self.zentinelle_key = zentinelle_key
         self.port = port
         self.host = host
@@ -144,8 +152,9 @@ class ProxyServer:
         print(f"Zentinelle proxy started on http://{self.host}:{self.port}")
         print(f"Forwarding to: {self.zentinelle_endpoint}")
         print()
-        print("Configure Claude Code:")
-        print(f"  export ANTHROPIC_BASE_URL=http://{self.host}:{self.port}")
+        print("Configure your agent:")
+        env_var = _PROVIDER_ENV_VARS.get(self.provider, "ANTHROPIC_BASE_URL")
+        print(f"  export {env_var}=http://{self.host}:{self.port}")
         print()
         print("Press Ctrl+C to stop.")
 
@@ -171,6 +180,7 @@ class ProxyServer:
 def run_proxy(
     zentinelle_endpoint: str,
     zentinelle_key: str,
+    provider: str = "anthropic",
     port: int = _DEFAULT_PORT,
     host: str = "127.0.0.1",
 ):
@@ -178,6 +188,7 @@ def run_proxy(
     server = ProxyServer(
         zentinelle_endpoint=zentinelle_endpoint,
         zentinelle_key=zentinelle_key,
+        provider=provider,
         port=port,
         host=host,
     )

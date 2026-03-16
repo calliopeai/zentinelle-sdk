@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "zentinelle-claude-code"
+name = "zentinelle-agent"
 version = "0.1.0"
-description = "Zentinelle integration for Claude Code - governance, policy enforcement, and audit for Claude Code sessions"
+description = "Zentinelle agent integration - governance, policy enforcement, and audit for AI coding agents"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.9"
@@ -13,14 +13,14 @@ authors = [
     { name = "Calliope Labs", email = "engineering@calliope.ai" }
 ]
 keywords = [
-    "claude",
-    "claude-code",
-    "anthropic",
     "ai",
     "agents",
     "governance",
     "guardrails",
     "zentinelle",
+    "claude-code",
+    "codex",
+    "gemini",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -44,15 +44,15 @@ dev = [
 ]
 
 [project.scripts]
-zentinelle-claude-code = "zentinelle_claude_code.cli:main"
+zentinelle-agent = "zentinelle_agent.cli:main"
 
 [project.urls]
 Homepage = "https://zentinelle.ai"
-Documentation = "https://docs.zentinelle.ai/integrations/claude-code"
+Documentation = "https://docs.zentinelle.ai/integrations/agent"
 Repository = "https://github.com/calliopeai/zentinelle-sdk"
 
 [tool.hatch.build.targets.wheel]
-packages = ["zentinelle_claude_code"]
+packages = ["zentinelle_agent"]
 
 [tool.hatch.build.targets.wheel.sources]
-"zentinelle_claude_code/skill" = "zentinelle_claude_code/skill"
+"zentinelle_agent/skill" = "zentinelle_agent/skill"
