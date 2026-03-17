@@ -75,7 +75,7 @@ def main():
                     "outputs": tool_response,
                     "source": "claude_code_hook",
                 },
-                "timestamp": datetime.now(timezone.utc).isoformat() + "Z",
+                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                 "user_id": "",
             }
         ],

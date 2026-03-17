@@ -61,7 +61,7 @@ def install_gemini_hooks(
             pass
 
     if "hooks" not in settings:
-        settings["hooks"] = []
+        settings["hooks"] = {}
 
     pre_script = find_hook_script("pre_tool")
     post_script = find_hook_script("post_tool")
@@ -69,25 +69,24 @@ def install_gemini_hooks(
     pre_cmd = build_hook_command(pre_script, endpoint, api_key, agent_id, fail_open)
     post_cmd = build_hook_command(post_script, endpoint, api_key, agent_id)
 
-    # Remove any existing Zentinelle hooks
-    settings["hooks"] = [
-        h for h in settings["hooks"]
-        if "zentinelle" not in h.get("name", "").lower()
-    ]
+    if not isinstance(settings["hooks"], dict):
+        settings["hooks"] = {}
 
-    # Add Pre-tool hook (blocking)
-    settings["hooks"].append({
-        "name": "zentinelle-pre-tool",
-        "events": ["pre-tool"],
-        "command": pre_cmd,
-    })
-
-    # Add Post-tool hook (audit)
-    settings["hooks"].append({
-        "name": "zentinelle-post-tool",
-        "events": ["post-tool"],
-        "command": post_cmd,
-    })
+    # Event keys: BeforeTool, AfterTool
+    # Each value: array of { matcher: "", hooks: [ { type: "command", command: "..." } ] }
+    for event, cmd in (("BeforeTool", pre_cmd), ("AfterTool", post_cmd)):
+        event_hooks = settings["hooks"].get(event, [])
+        if not isinstance(event_hooks, list):
+            event_hooks = []
+        
+        # Remove any existing Zentinelle hooks for this event
+        event_hooks = [h for h in event_hooks if "zentinelle" not in json.dumps(h).lower()]
+        
+        event_hooks.append({
+            "matcher": "",
+            "hooks": [{"type": "command", "command": cmd}]
+        })
+        settings["hooks"][event] = event_hooks
 
     settings_path.write_text(json.dumps(settings, indent=2) + "\n")
     return settings_path
@@ -105,10 +104,21 @@ def uninstall_gemini_hooks(project_dir: str) -> Path:
         return settings_path
 
     if "hooks" in settings:
-        settings["hooks"] = [
-            h for h in settings["hooks"]
-            if "zentinelle" not in h.get("name", "").lower()
-        ]
+        if isinstance(settings["hooks"], dict):
+            for event in list(settings["hooks"].keys()):
+                event_hooks = settings["hooks"][event]
+                if isinstance(event_hooks, list):
+                    settings["hooks"][event] = [
+                        h for h in event_hooks
+                        if "zentinelle" not in json.dumps(h).lower()
+                    ]
+                if not settings["hooks"][event]:
+                    del settings["hooks"][event]
+        else:
+            settings["hooks"] = [
+                h for h in settings["hooks"]
+                if "zentinelle" not in json.dumps(h).lower()
+            ]
         if not settings["hooks"]:
             del settings["hooks"]
 
