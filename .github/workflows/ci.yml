@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-agent-plugin:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        working-directory: plugins/agent
+        run: |
+          pip install -e ".[dev]"
+
+      - name: Lint
+        working-directory: plugins/agent
+        run: |
+          pip install ruff
+          ruff check zentinelle_agent/
+
+      - name: Test imports
+        working-directory: plugins/agent
+        run: |
+          python -c "from zentinelle_agent.cli import main; print('CLI import OK')"
+          python -c "from zentinelle_agent.proxy import ProxyServer; print('Proxy import OK')"
+          python -c "from zentinelle_agent.hooks.install import install_hooks; print('Hooks import OK')"
+          python -c "from zentinelle_agent.hooks.gemini import install_gemini_hooks; print('Gemini hooks import OK')"
+
+      - name: Test CLI help
+        working-directory: plugins/agent
+        run: |
+          python -m zentinelle_agent.cli --help
+          python -m zentinelle_agent.cli proxy --help
+          python -m zentinelle_agent.cli install --help
+          python -m zentinelle_agent.cli install-gemini --help
+
+      - name: Test hook scripts (dry run)
+        working-directory: plugins/agent
+        run: |
+          # PreToolUse with no config — should exit 0 (not configured = pass through)
+          echo '{"tool_name":"Bash","tool_input":{"command":"ls"}}' | python zentinelle_agent/hooks/pre_tool.py
+          echo "pre_tool exit: $?"
+
+          # PostToolUse with no config — should exit 0
+          echo '{"tool_name":"Bash","tool_input":{"command":"ls"},"tool_response":{"output":"file.txt"}}' | python zentinelle_agent/hooks/post_tool.py
+          echo "post_tool exit: $?"
