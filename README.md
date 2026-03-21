@@ -136,9 +136,9 @@ Framework-specific integrations are coming soon:
 
 ## Documentation
 
-- [Zentinelle Docs](https://zentinelle.dev)
-- [API Reference](https://zentinelle.dev/wiki/sdk/)
-- [Integration Guides](https://zentinelle.dev/wiki/sdk/)
+- [Zentinelle Docs](https://docs.zentinelle.ai)
+- [API Reference](https://docs.zentinelle.ai/api)
+- [Integration Guides](https://docs.zentinelle.ai/integrations)
 
 ## License
 
