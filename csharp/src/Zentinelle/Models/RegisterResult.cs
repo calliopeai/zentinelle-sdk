@@ -8,28 +8,28 @@ namespace Zentinelle.Models;
 public class RegisterResult
 {
     /// <summary>
-    /// The assigned session ID.
+    /// The registered agent ID.
     /// </summary>
-    [JsonPropertyName("session_id")]
-    public string SessionId { get; set; } = string.Empty;
+    [JsonPropertyName("agent_id")]
+    public string AgentId { get; set; } = string.Empty;
 
     /// <summary>
-    /// The agent configuration.
+    /// The runtime API key returned after bootstrap registration.
+    /// </summary>
+    [JsonPropertyName("api_key")]
+    public string? ApiKey { get; set; }
+
+    /// <summary>
+    /// Runtime configuration for the agent.
     /// </summary>
     [JsonPropertyName("config")]
-    public PolicyConfig? Config { get; set; }
+    public Dictionary<string, object> Config { get; set; } = new();
 
     /// <summary>
-    /// Whether registration was successful.
+    /// Effective policies returned during registration.
     /// </summary>
-    [JsonPropertyName("success")]
-    public bool Success { get; set; }
-
-    /// <summary>
-    /// Any warnings from registration.
-    /// </summary>
-    [JsonPropertyName("warnings")]
-    public List<string>? Warnings { get; set; }
+    [JsonPropertyName("policies")]
+    public List<PolicyConfig> Policies { get; set; } = new();
 }
 
 /// <summary>
@@ -38,17 +38,17 @@ public class RegisterResult
 public class RegisterOptions
 {
     /// <summary>
-    /// User ID for the session.
+    /// Declared agent capabilities.
     /// </summary>
-    public string? UserId { get; set; }
+    public List<string> Capabilities { get; set; } = new();
 
     /// <summary>
-    /// Custom session ID (auto-generated if not provided).
+    /// Additional metadata for the agent.
     /// </summary>
-    public string? SessionId { get; set; }
+    public Dictionary<string, object> Metadata { get; set; } = new();
 
     /// <summary>
-    /// Additional metadata for the session.
+    /// Optional display name for the agent.
     /// </summary>
-    public Dictionary<string, object>? Metadata { get; set; }
+    public string? Name { get; set; }
 }

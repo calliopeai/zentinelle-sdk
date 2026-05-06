@@ -16,22 +16,32 @@ namespace Zentinelle;
 /// </summary>
 public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
 {
+    private const string ApiBasePath = "/api/zentinelle/v1";
+
     private readonly HttpClient _httpClient;
-    private readonly bool _ownsHttpClient;  // Track if we own the HttpClient (should dispose) or if it was injected
+    private readonly bool _ownsHttpClient;
     private readonly ZentinelleOptions _options;
     private readonly ILogger<ZentinelleClient> _logger;
     private readonly CircuitBreaker _circuitBreaker;
     private readonly ConcurrentQueue<Event> _eventBuffer;
-    private readonly int _maxBufferSize; // Maximum buffer size to prevent memory leaks
+    private readonly int _maxBufferSize;
     private readonly Timer _flushTimer;
     private readonly Timer _heartbeatTimer;
     private readonly SemaphoreSlim _flushLock = new(1, 1);
     private readonly CancellationTokenSource _cts = new();
-    private readonly object _configCacheLock = new();  // Lock for config cache thread safety
+    private readonly object _stateLock = new();
+    private readonly object _configCacheLock = new();
+    private readonly object _secretsCacheLock = new();
+    private readonly string _endpoint;
 
-    private PolicyConfig? _cachedConfig;
+    private string _apiKey;
+    private string? _agentId;
+    private bool _registered;
+    private ConfigResult? _cachedConfig;
     private DateTime _configCacheTime;
-    private int _disposed;  // 0 = not disposed, 1 = disposed (using int for Interlocked)
+    private Dictionary<string, string>? _secretsCache;
+    private DateTime _secretsCacheTime;
+    private int _disposed;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -42,9 +52,6 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
     /// <summary>
     /// Creates a new Zentinelle client with the specified options.
     /// </summary>
-    /// <param name="options">Client configuration options.</param>
-    /// <param name="logger">Optional logger instance.</param>
-    /// <param name="httpClient">Optional custom HttpClient instance.</param>
     public ZentinelleClient(
         ZentinelleOptions options,
         ILogger<ZentinelleClient>? logger = null,
@@ -53,24 +60,17 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         _options = options ?? throw new ArgumentNullException(nameof(options));
         _logger = logger ?? NullLogger<ZentinelleClient>.Instance;
 
-        // Validate API key
         if (string.IsNullOrWhiteSpace(options.ApiKey) || options.ApiKey.Length < 10)
         {
             throw new ArgumentException("ApiKey is required and must be valid", nameof(options));
         }
 
-        // Validate API key format (should start with known prefixes)
-        var validPrefixes = new[] { "sk_agent_", "sk_test_", "sk_live_", "znt_" };
+        var validPrefixes = new[] { "sk_agent_", "sk_test_", "sk_live_", "znt_", "bt_" };
         if (!validPrefixes.Any(prefix => options.ApiKey.StartsWith(prefix, StringComparison.Ordinal)))
         {
             _logger.LogWarning(
-                "API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*). " +
+                "API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*, bt_*). " +
                 "This may indicate an invalid key.");
-        }
-
-        if (string.IsNullOrWhiteSpace(options.AgentId))
-        {
-            throw new ArgumentException("AgentId is required", nameof(options));
         }
 
         if (string.IsNullOrWhiteSpace(options.AgentType))
@@ -78,34 +78,38 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
             throw new ArgumentException("AgentType is required", nameof(options));
         }
 
-        // Enforce HTTPS for security (API keys are transmitted in headers)
-        if (!options.BaseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        _endpoint = (string.IsNullOrWhiteSpace(options.BaseUrl) ? "https://api.zentinelle.ai" : options.BaseUrl)
+            .TrimEnd('/');
+        var isLocalhost = _endpoint.Contains("localhost", StringComparison.OrdinalIgnoreCase) ||
+            _endpoint.Contains("127.0.0.1", StringComparison.OrdinalIgnoreCase);
+        if (!_endpoint.StartsWith("https://", StringComparison.OrdinalIgnoreCase) &&
+            !isLocalhost)
         {
-            throw new ArgumentException("BaseUrl must use HTTPS for security", nameof(options));
+            throw new ArgumentException("BaseUrl must use HTTPS for security (localhost excepted)", nameof(options));
         }
 
-        // Track whether we own the HttpClient (and should dispose it) or if it was injected
+        _apiKey = options.ApiKey;
+        _agentId = options.AgentId;
+        _registered = !string.IsNullOrWhiteSpace(_agentId) && !_apiKey.StartsWith("bt_", StringComparison.Ordinal);
+
         _ownsHttpClient = httpClient == null;
         _httpClient = httpClient ?? new HttpClient();
 
-        // Only modify headers if we own the HttpClient, or if it hasn't been configured
+        if (_httpClient.BaseAddress == null)
+        {
+            _httpClient.BaseAddress = new Uri(_endpoint);
+        }
+        if (!_httpClient.DefaultRequestHeaders.UserAgent.Any())
+        {
+            _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("zentinelle-csharp/0.1.0");
+        }
+        if (!_httpClient.DefaultRequestHeaders.Accept.Any())
+        {
+            _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+        }
         if (_ownsHttpClient)
         {
-            _httpClient.BaseAddress = new Uri(options.BaseUrl);
-            _httpClient.DefaultRequestHeaders.Add("X-Zentinelle-Key", options.ApiKey);
-            _httpClient.DefaultRequestHeaders.Add("User-Agent", "zentinelle-csharp/0.1.0");
-            _httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
             _httpClient.Timeout = options.Timeout;
-        }
-        else
-        {
-            // For injected HttpClient, only set headers that aren't already set
-            if (_httpClient.BaseAddress == null)
-                _httpClient.BaseAddress = new Uri(options.BaseUrl);
-            if (!_httpClient.DefaultRequestHeaders.Contains("X-Zentinelle-Key"))
-                _httpClient.DefaultRequestHeaders.Add("X-Zentinelle-Key", options.ApiKey);
-            if (!_httpClient.DefaultRequestHeaders.Contains("User-Agent"))
-                _httpClient.DefaultRequestHeaders.Add("User-Agent", "zentinelle-csharp/0.1.0");
         }
 
         _circuitBreaker = new CircuitBreaker(
@@ -113,7 +117,6 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
             options.CircuitBreakerRecovery);
 
         _eventBuffer = new ConcurrentQueue<Event>();
-        // Maximum buffer size to prevent memory leaks (10x normal or 1000, whichever is larger)
         _maxBufferSize = Math.Max(options.MaxBatchSize * 10, 1000);
 
         _flushTimer = new Timer(
@@ -139,7 +142,7 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            // Expected during shutdown
+            // Expected during shutdown.
         }
         catch (Exception ex)
         {
@@ -153,11 +156,15 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
 
         try
         {
-            await SendHeartbeatAsync().ConfigureAwait(false);
+            var result = await HeartbeatAsync(cancellationToken: _cts.Token).ConfigureAwait(false);
+            if (result?.HasConfigChangeSignal == true)
+            {
+                await GetConfigAsync(forceRefresh: true, cancellationToken: _cts.Token).ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException)
         {
-            // Expected during shutdown
+            // Expected during shutdown.
         }
         catch (Exception ex)
         {
@@ -172,21 +179,20 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
     {
         var apiKey = Environment.GetEnvironmentVariable("ZENTINELLE_API_KEY")
             ?? throw new InvalidOperationException("ZENTINELLE_API_KEY environment variable not set");
-        var agentId = Environment.GetEnvironmentVariable("ZENTINELLE_AGENT_ID")
-            ?? throw new InvalidOperationException("ZENTINELLE_AGENT_ID environment variable not set");
         var agentType = Environment.GetEnvironmentVariable("ZENTINELLE_AGENT_TYPE")
             ?? throw new InvalidOperationException("ZENTINELLE_AGENT_TYPE environment variable not set");
 
         return new ZentinelleClient(new ZentinelleOptions
         {
             ApiKey = apiKey,
-            AgentId = agentId,
-            AgentType = agentType
+            AgentId = Environment.GetEnvironmentVariable("ZENTINELLE_AGENT_ID"),
+            AgentType = agentType,
+            OrgId = Environment.GetEnvironmentVariable("ZENTINELLE_ORG_ID")
         }, logger);
     }
 
     /// <summary>
-    /// Registers the agent session with Zentinelle.
+    /// Registers the agent with Zentinelle.
     /// </summary>
     public async Task<RegisterResult> RegisterAsync(
         RegisterOptions? options = null,
@@ -194,24 +200,53 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
     {
         var request = new
         {
-            agent_id = _options.AgentId,
+            agent_id = _agentId,
             agent_type = _options.AgentType,
-            user_id = options?.UserId,
-            session_id = options?.SessionId ?? Guid.NewGuid().ToString(),
-            metadata = options?.Metadata
+            capabilities = options?.Capabilities ?? Array.Empty<string>(),
+            metadata = options?.Metadata ?? new Dictionary<string, object>(),
+            name = options?.Name
         };
 
         var response = await SendRequestAsync<RegisterResult>(
             HttpMethod.Post,
-            "/api/v1/register",
+            "/register",
             request,
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken,
+            forRegistration: true).ConfigureAwait(false);
 
-        _cachedConfig = response.Config;
-        _configCacheTime = DateTime.UtcNow;
+        if (string.IsNullOrWhiteSpace(response.AgentId))
+        {
+            throw new ZentinelleException("Invalid response: missing required 'agent_id'");
+        }
 
-        _logger.LogInformation("Agent registered with session {SessionId}", response.SessionId);
-        return response;
+        response.Config ??= new Dictionary<string, object>();
+        response.Policies ??= new List<PolicyConfig>();
+
+        lock (_stateLock)
+        {
+            _agentId = response.AgentId;
+            if (!string.IsNullOrWhiteSpace(response.ApiKey))
+            {
+                _apiKey = response.ApiKey!;
+            }
+            _registered = true;
+        }
+
+        lock (_configCacheLock)
+        {
+            _cachedConfig = new ConfigResult
+            {
+                AgentId = response.AgentId,
+                Config = CopyDictionary(response.Config),
+                Policies = ClonePolicies(response.Policies),
+                UpdatedAt = DateTime.UtcNow
+            };
+            _configCacheTime = DateTime.UtcNow;
+        }
+
+        _logger.LogInformation("Registered agent {AgentId}", response.AgentId);
+
+        return CloneRegisterResult(response);
     }
 
     /// <summary>
@@ -222,23 +257,30 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         EvaluateOptions? options = null,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrEmpty(action))
+        if (string.IsNullOrWhiteSpace(action))
+        {
             throw new ArgumentException("Action cannot be null or empty", nameof(action));
+        }
 
+        var agentId = RequireAgentId();
         var request = new
         {
-            agent_id = _options.AgentId,
+            agent_id = agentId,
             action,
             user_id = options?.UserId,
-            context = options?.Context
+            context = options?.Context ?? new Dictionary<string, object>()
         };
 
         var result = await SendRequestAsync<EvaluateResult>(
             HttpMethod.Post,
-            "/api/v1/evaluate",
+            "/evaluate",
             request,
             cancellationToken,
             validateAllowedField: true).ConfigureAwait(false);
+
+        result.PoliciesEvaluated ??= new List<PolicyEvaluation>();
+        result.Warnings ??= new List<string>();
+        result.Context ??= new Dictionary<string, object>();
 
         return result;
     }
@@ -252,23 +294,60 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Checks if a tool call is allowed.
+    /// </summary>
+    public Task<EvaluateResult> CanCallToolAsync(
+        string toolName,
+        string? userId = null,
+        CancellationToken cancellationToken = default)
+    {
+        return EvaluateAsync(
+            "tool_call",
+            new EvaluateOptions
+            {
+                UserId = userId,
+                Context = new Dictionary<string, object> { ["tool"] = toolName }
+            },
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Checks if a model request is allowed.
+    /// </summary>
+    public Task<EvaluateResult> CanUseModelAsync(
+        string model,
+        string provider = "openai",
+        CancellationToken cancellationToken = default)
+    {
+        return EvaluateAsync(
+            "model_request",
+            new EvaluateOptions
+            {
+                Context = new Dictionary<string, object>
+                {
+                    ["model"] = model,
+                    ["provider"] = provider
+                }
+            },
+            cancellationToken);
+    }
+
+    /// <summary>
     /// Emits an event for tracking.
     /// </summary>
     public void Emit(Event evt)
     {
         if (evt == null)
+        {
             throw new ArgumentNullException(nameof(evt));
+        }
 
         evt.Timestamp ??= DateTime.UtcNow;
-        evt.AgentId ??= _options.AgentId;
 
-        // Use lock to prevent race conditions during buffer size enforcement
         lock (_eventBuffer)
         {
-            // Enforce max buffer size to prevent memory leaks
             if (_eventBuffer.Count >= _maxBufferSize)
             {
-                // Drop enough events to make room, plus a small buffer to reduce frequency of drops
                 var toDrop = Math.Max(1, _eventBuffer.Count - _maxBufferSize + 10);
                 var dropped = 0;
                 for (var i = 0; i < toDrop && _eventBuffer.TryDequeue(out _); i++)
@@ -286,7 +365,6 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
 
         if (_eventBuffer.Count >= _options.MaxBatchSize)
         {
-            // Use the safe wrapper to avoid fire-and-forget exceptions
             SafeFlushEventsAsync();
         }
     }
@@ -297,52 +375,159 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
     public async Task EmitAsync(Event evt, CancellationToken cancellationToken = default)
     {
         Emit(evt);
-        await FlushEventsAsync(cancellationToken);
+        await FlushEventsAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Convenience wrapper for tool-call events.
+    /// </summary>
+    public void EmitToolCall(string toolName, string? userId = null, long? durationMs = null)
+    {
+        var evt = Event.ToolCall(toolName, success: true);
+        evt.UserId = userId;
+        if (durationMs.HasValue)
+        {
+            evt.Payload["duration_ms"] = durationMs.Value;
+        }
+        Emit(evt);
+    }
+
+    /// <summary>
+    /// Convenience wrapper for model-request events.
+    /// </summary>
+    public void EmitModelRequest(
+        string provider,
+        string model,
+        int inputTokens,
+        int outputTokens,
+        string? userId = null,
+        long? durationMs = null,
+        decimal? estimatedCost = null)
+    {
+        var evt = Event.ModelRequest(model, new ModelUsage
+        {
+            Provider = provider,
+            Model = model,
+            InputTokens = inputTokens,
+            OutputTokens = outputTokens,
+            EstimatedCost = estimatedCost
+        });
+        evt.UserId = userId;
+        if (durationMs.HasValue)
+        {
+            evt.Payload["duration_ms"] = durationMs.Value;
+        }
+        Emit(evt);
+    }
+
+    /// <summary>
+    /// Tracks model usage for cost policy evaluation.
+    /// </summary>
+    public void TrackUsage(ModelUsage usage)
+    {
+        Emit(new Event
+        {
+            Type = "model_usage",
+            Category = EventCategory.Telemetry,
+            Payload = new Dictionary<string, object>
+            {
+                ["provider"] = usage.Provider ?? string.Empty,
+                ["model"] = usage.Model ?? string.Empty,
+                ["input_tokens"] = usage.InputTokens,
+                ["output_tokens"] = usage.OutputTokens,
+                ["estimated_cost"] = usage.EstimatedCost ?? 0m
+            }
+        });
     }
 
     /// <summary>
     /// Gets the agent configuration from Zentinelle.
     /// </summary>
-    public async Task<PolicyConfig> GetConfigAsync(
+    public async Task<ConfigResult> GetConfigAsync(
         bool forceRefresh = false,
         CancellationToken cancellationToken = default)
     {
-        // Thread-safe cache check
+        var agentId = RequireAgentId();
+
         lock (_configCacheLock)
         {
             if (!forceRefresh &&
                 _cachedConfig != null &&
                 DateTime.UtcNow - _configCacheTime < _options.ConfigCacheDuration)
             {
-                return _cachedConfig;
+                return CloneConfigResult(_cachedConfig);
             }
         }
 
-        var response = await SendRequestAsync<PolicyConfig>(
+        var response = await SendRequestAsync<ConfigResult>(
             HttpMethod.Get,
-            $"/api/v1/config/{_options.AgentId}",
+            $"/config/{agentId}",
             null,
             cancellationToken).ConfigureAwait(false);
 
+        response.AgentId = string.IsNullOrWhiteSpace(response.AgentId) ? agentId : response.AgentId;
+        response.Config ??= new Dictionary<string, object>();
+        response.Policies ??= new List<PolicyConfig>();
+        if (response.UpdatedAt == default)
+        {
+            response.UpdatedAt = DateTime.UtcNow;
+        }
+
         lock (_configCacheLock)
         {
-            _cachedConfig = response;
+            _cachedConfig = CloneConfigResult(response);
             _configCacheTime = DateTime.UtcNow;
         }
-        return response;
+
+        return CloneConfigResult(response);
     }
 
     /// <summary>
     /// Gets secrets configured for this agent.
     /// </summary>
     public async Task<Dictionary<string, string>> GetSecretsAsync(
+        bool forceRefresh = false,
         CancellationToken cancellationToken = default)
     {
-        return await SendRequestAsync<Dictionary<string, string>>(
+        RequireAgentId();
+
+        lock (_secretsCacheLock)
+        {
+            if (!forceRefresh &&
+                _secretsCache != null &&
+                DateTime.UtcNow - _secretsCacheTime < _options.SecretsCacheDuration)
+            {
+                return CopyStringDictionary(_secretsCache);
+            }
+        }
+
+        var agentId = RequireAgentId();
+        var response = await SendRequestAsync<SecretsEnvelope>(
             HttpMethod.Get,
-            $"/api/v1/secrets/{_options.AgentId}",
+            $"/secrets/{agentId}",
             null,
             cancellationToken).ConfigureAwait(false);
+
+        var secrets = CopyStringDictionary(response.Secrets);
+        lock (_secretsCacheLock)
+        {
+            _secretsCache = CopyStringDictionary(secrets);
+            _secretsCacheTime = DateTime.UtcNow;
+        }
+
+        return secrets;
+    }
+
+    /// <summary>
+    /// Gets a single secret value.
+    /// </summary>
+    public async Task<string?> GetSecretAsync(
+        string key,
+        string? defaultValue = null,
+        CancellationToken cancellationToken = default)
+    {
+        var secrets = await GetSecretsAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
+        return secrets.TryGetValue(key, out var value) ? value : defaultValue;
     }
 
     /// <summary>
@@ -355,10 +540,21 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
 
     private async Task FlushEventsAsync(CancellationToken cancellationToken = default)
     {
-        if (_eventBuffer.IsEmpty) return;
+        if (_eventBuffer.IsEmpty)
+        {
+            return;
+        }
+
+        var agentId = CurrentAgentId;
+        if (string.IsNullOrWhiteSpace(agentId))
+        {
+            return;
+        }
 
         if (!await _flushLock.WaitAsync(0, cancellationToken).ConfigureAwait(false))
-            return; // Another flush is in progress
+        {
+            return;
+        }
 
         List<Event>? events = null;
         try
@@ -369,36 +565,41 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
                 events.Add(evt);
             }
 
-            if (events.Count == 0) return;
+            if (events.Count == 0)
+            {
+                return;
+            }
 
-            var request = new { events };
+            var request = new
+            {
+                agent_id = agentId,
+                events = events.Select(evt => evt.ToApiPayload()).ToList()
+            };
+
             await SendRequestAsync<object>(
                 HttpMethod.Post,
-                "/api/v1/events",
+                "/events",
                 request,
                 cancellationToken).ConfigureAwait(false);
 
             _logger.LogDebug("Flushed {Count} events", events.Count);
-            events = null; // Clear reference so we don't re-queue on success
+            events = null;
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to flush events");
 
-            // Re-queue events on failure (check against maxBufferSize to avoid overflow)
             if (events != null && events.Count > 0)
             {
                 lock (_eventBuffer)
                 {
                     if (_eventBuffer.Count + events.Count <= _maxBufferSize)
                     {
-                        // Re-queue at the front by creating a new queue
                         var newBuffer = new ConcurrentQueue<Event>(events);
                         while (_eventBuffer.TryDequeue(out var existing))
                         {
                             newBuffer.Enqueue(existing);
                         }
-                        // Copy back
                         while (newBuffer.TryDequeue(out var evt))
                         {
                             _eventBuffer.Enqueue(evt);
@@ -417,31 +618,50 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         }
     }
 
-    private async Task SendHeartbeatAsync()
+    /// <summary>
+    /// Sends a heartbeat to Zentinelle.
+    /// </summary>
+    public async Task<HeartbeatResult?> HeartbeatAsync(
+        string status = "healthy",
+        Dictionary<string, object>? metrics = null,
+        CancellationToken cancellationToken = default)
     {
-        try
+        if (!IsRegistered)
         {
-            var request = new
-            {
-                agent_id = _options.AgentId,
-                status = "healthy",
-                metrics = new
-                {
-                    pending_events = _eventBuffer.Count,
-                    circuit_breaker_state = _circuitBreaker.State.ToString()
-                }
-            };
+            return null;
+        }
 
-            await SendRequestAsync<object>(
-                HttpMethod.Post,
-                "/api/v1/heartbeat",
-                request,
-                _cts.Token).ConfigureAwait(false);
-        }
-        catch (Exception ex)
+        var agentId = CurrentAgentId;
+        if (string.IsNullOrWhiteSpace(agentId))
         {
-            _logger.LogDebug(ex, "Heartbeat failed");
+            return null;
         }
+
+        var response = await SendRequestAsync<HeartbeatResult>(
+            HttpMethod.Post,
+            "/heartbeat",
+            new
+            {
+                agent_id = agentId,
+                status = string.IsNullOrWhiteSpace(status) ? "healthy" : status,
+                metrics = metrics ?? new Dictionary<string, object>()
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        if (!response.Acknowledged &&
+            !response.ConfigChanged &&
+            !response.DriftDetected &&
+            !response.SyncRequired &&
+            response.NextHeartbeatSeconds == 0)
+        {
+            response.Acknowledged = true;
+        }
+        if (response.NextHeartbeatSeconds == 0)
+        {
+            response.NextHeartbeatSeconds = 60;
+        }
+
+        return response;
     }
 
     private async Task<T> SendRequestAsync<T>(
@@ -449,7 +669,8 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         string path,
         object? body,
         CancellationToken cancellationToken,
-        bool validateAllowedField = false)
+        bool validateAllowedField = false,
+        bool forRegistration = false)
     {
         if (!_circuitBreaker.CanExecute())
         {
@@ -468,7 +689,8 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         {
             try
             {
-                using var request = new HttpRequestMessage(method, path);
+                using var request = new HttpRequestMessage(method, $"{ApiBasePath}{path}");
+                AddAuthHeaders(request, forRegistration);
 
                 if (body != null)
                 {
@@ -482,15 +704,16 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
                 {
                     _circuitBreaker.RecordSuccess();
                     var content = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+                    if (string.IsNullOrWhiteSpace(content))
+                    {
+                        return default!;
+                    }
 
-                    // For evaluate requests, validate that 'allowed' field is present
-                    // Never default to true - this would bypass security
                     if (validateAllowedField)
                     {
                         using var doc = JsonDocument.Parse(content);
                         var isFailOpen = doc.RootElement.TryGetProperty("fail_open", out var failOpenProp) &&
-                                         failOpenProp.ValueKind == JsonValueKind.True;
-
+                            failOpenProp.ValueKind == JsonValueKind.True;
                         if (!isFailOpen && !doc.RootElement.TryGetProperty("allowed", out _))
                         {
                             throw new ZentinelleException("Invalid response: missing required 'allowed' field");
@@ -500,22 +723,27 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
                     return JsonSerializer.Deserialize<T>(content, JsonOptions)!;
                 }
 
-                // Handle specific error codes
                 var statusCode = (int)response.StatusCode;
                 var errorContent = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
                 if (statusCode == 401)
+                {
                     throw new AuthenticationException("Invalid API key");
-
+                }
+                if (statusCode == 403)
+                {
+                    throw new AuthenticationException("Access denied");
+                }
                 if (statusCode == 429)
                 {
+                    _circuitBreaker.RecordSuccess();
                     var retryAfter = response.Headers.RetryAfter?.Delta?.Seconds ?? 60;
-                    throw new RateLimitException($"Rate limit exceeded", (int)retryAfter);
+                    throw new RateLimitException("Rate limit exceeded", (int)retryAfter);
                 }
-
                 if (statusCode >= 500 && retries < _options.MaxRetries)
                 {
-                    lastException = new ZentinelleException($"Server error: {statusCode}");
+                    lastException = new ConnectionException($"Server error: {statusCode}");
+                    _circuitBreaker.RecordFailure();
                     retries++;
                     await Task.Delay(GetBackoffDelay(retries), cancellationToken).ConfigureAwait(false);
                     continue;
@@ -566,6 +794,31 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         throw lastException ?? new ZentinelleException("Request failed after retries");
     }
 
+    private void AddAuthHeaders(HttpRequestMessage request, bool forRegistration)
+    {
+        string apiKey;
+        string? orgId;
+        lock (_stateLock)
+        {
+            apiKey = _apiKey;
+            orgId = _options.OrgId;
+        }
+
+        if (forRegistration && apiKey.StartsWith("bt_", StringComparison.Ordinal))
+        {
+            request.Headers.Add("X-Zentinelle-Bootstrap", apiKey);
+        }
+        else
+        {
+            request.Headers.Add("X-Zentinelle-Key", apiKey);
+        }
+
+        if (!string.IsNullOrWhiteSpace(orgId))
+        {
+            request.Headers.Add("X-Zentinelle-Org", orgId);
+        }
+    }
+
     private static TimeSpan GetBackoffDelay(int attempt)
     {
         var delayMs = Math.Min(1000 * Math.Pow(2, attempt - 1), 30000);
@@ -581,10 +834,51 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
             {
                 Allowed = true,
                 Reason = "fail_open",
-                FailOpen = true
+                FailOpen = true,
+                PoliciesEvaluated = new List<PolicyEvaluation>(),
+                Warnings = new List<string> { "Service unavailable - fail-open mode active" },
+                Context = new Dictionary<string, object>()
             };
         }
         return default!;
+    }
+
+    private string RequireAgentId()
+    {
+        lock (_stateLock)
+        {
+            if (string.IsNullOrWhiteSpace(_agentId))
+            {
+                throw new ZentinelleException(
+                    "Agent not registered. Call RegisterAsync() first or provide AgentId in the constructor.");
+            }
+            return _agentId!;
+        }
+    }
+
+    private string? CurrentAgentId
+    {
+        get
+        {
+            lock (_stateLock)
+            {
+                return _agentId;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether the client currently has a registered runtime identity.
+    /// </summary>
+    public bool IsRegistered
+    {
+        get
+        {
+            lock (_stateLock)
+            {
+                return _registered;
+            }
+        }
     }
 
     /// <summary>
@@ -592,26 +886,28 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
     /// </summary>
     public override string ToString()
     {
-        var maskedKey = "***";
-        if (_options.ApiKey.Length > 12)
+        string apiKey;
+        string? agentId;
+        lock (_stateLock)
         {
-            maskedKey = _options.ApiKey[..8] + "..." + _options.ApiKey[^4..];
+            apiKey = _apiKey;
+            agentId = _agentId;
         }
-        return $"ZentinelleClient(agent_id=\"{_options.AgentId}\", agent_type=\"{_options.AgentType}\", endpoint=\"{_options.BaseUrl}\", api_key=\"{maskedKey}\")";
+
+        var maskedKey = apiKey.Length > 12
+            ? apiKey[..8] + "..." + apiKey[^4..]
+            : "***";
+        return $"ZentinelleClient(agent_id=\"{agentId}\", agent_type=\"{_options.AgentType}\", endpoint=\"{_endpoint}\", api_key=\"{maskedKey}\")";
     }
 
     /// <inheritdoc />
     public void Dispose()
     {
-        // Atomically check and set disposed flag to prevent double-dispose race
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
-        // Stop timers first (before cancellation)
         _flushTimer.Dispose();
         _heartbeatTimer.Dispose();
 
-        // Perform final flush with a fresh cancellation token and timeout
-        // Don't use _cts as we want to allow the flush to complete
         try
         {
             using var flushCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -619,13 +915,11 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         }
         catch (Exception)
         {
-            // Ignore flush errors during disposal
+            // Ignore flush errors during disposal.
         }
 
-        // Now cancel any remaining operations
         _cts.Cancel();
 
-        // Only dispose HttpClient if we created it (not if it was injected)
         if (_ownsHttpClient)
         {
             _httpClient.Dispose();
@@ -637,15 +931,11 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
     /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
-        // Atomically check and set disposed flag to prevent double-dispose race
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
-        // Stop timers first (before cancellation)
         await _flushTimer.DisposeAsync().ConfigureAwait(false);
         await _heartbeatTimer.DisposeAsync().ConfigureAwait(false);
 
-        // Perform final flush with a fresh cancellation token and timeout
-        // Don't use _cts as we want to allow the flush to complete
         try
         {
             using var flushCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -653,18 +943,75 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         }
         catch (Exception)
         {
-            // Ignore flush errors during disposal
+            // Ignore flush errors during disposal.
         }
 
-        // Now cancel any remaining operations
         _cts.Cancel();
 
-        // Only dispose HttpClient if we created it (not if it was injected)
         if (_ownsHttpClient)
         {
             _httpClient.Dispose();
         }
         _flushLock.Dispose();
         _cts.Dispose();
+    }
+
+    private static RegisterResult CloneRegisterResult(RegisterResult source)
+    {
+        return new RegisterResult
+        {
+            AgentId = source.AgentId,
+            ApiKey = source.ApiKey,
+            Config = CopyDictionary(source.Config),
+            Policies = ClonePolicies(source.Policies)
+        };
+    }
+
+    private static ConfigResult CloneConfigResult(ConfigResult source)
+    {
+        return new ConfigResult
+        {
+            AgentId = source.AgentId,
+            Config = CopyDictionary(source.Config),
+            Policies = ClonePolicies(source.Policies),
+            UpdatedAt = source.UpdatedAt
+        };
+    }
+
+    private static List<PolicyConfig> ClonePolicies(IEnumerable<PolicyConfig>? policies)
+    {
+        if (policies == null)
+        {
+            return new List<PolicyConfig>();
+        }
+
+        return policies.Select(policy => new PolicyConfig
+        {
+            Id = policy.Id,
+            Name = policy.Name,
+            Type = policy.Type,
+            Enforcement = policy.Enforcement,
+            Config = CopyDictionary(policy.Config),
+            Priority = policy.Priority
+        }).ToList();
+    }
+
+    private static Dictionary<string, object> CopyDictionary(Dictionary<string, object>? source)
+    {
+        return source == null
+            ? new Dictionary<string, object>()
+            : new Dictionary<string, object>(source);
+    }
+
+    private static Dictionary<string, string> CopyStringDictionary(Dictionary<string, string>? source)
+    {
+        return source == null
+            ? new Dictionary<string, string>()
+            : new Dictionary<string, string>(source);
+    }
+
+    private sealed class SecretsEnvelope
+    {
+        public Dictionary<string, string>? Secrets { get; set; }
     }
 }

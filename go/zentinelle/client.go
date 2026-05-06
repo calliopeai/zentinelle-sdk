@@ -48,6 +48,7 @@ const (
 	DefaultTimeout       = 30 * time.Second
 	DefaultBufferSize    = 100
 	DefaultFlushInterval = 5 * time.Second
+	APIBasePath          = "/api/zentinelle/v1"
 )
 
 // Config holds client configuration.
@@ -90,6 +91,7 @@ type Client struct {
 	configCache      map[string]interface{}
 	configCacheTime  time.Time
 	configCacheMu    sync.RWMutex
+	policiesCache    []PolicyConfig
 }
 
 // NewClient creates a new Zentinelle client.
@@ -102,7 +104,7 @@ func NewClient(config Config) (*Client, error) {
 		return nil, fmt.Errorf("APIKey format is invalid")
 	}
 	// Validate API key format (should start with known prefixes)
-	validPrefixes := []string{"sk_agent_", "sk_test_", "sk_live_", "znt_"}
+	validPrefixes := []string{"sk_agent_", "sk_test_", "sk_live_", "znt_", "bt_"}
 	hasValidPrefix := false
 	for _, prefix := range validPrefixes {
 		if strings.HasPrefix(config.APIKey, prefix) {
@@ -111,7 +113,7 @@ func NewClient(config Config) (*Client, error) {
 		}
 	}
 	if !hasValidPrefix {
-		log.Printf("[Zentinelle] API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*). This may indicate an invalid key.")
+		log.Printf("[Zentinelle] API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*, bt_*). This may indicate an invalid key.")
 	}
 	if config.AgentType == "" {
 		return nil, fmt.Errorf("AgentType is required")
@@ -122,7 +124,7 @@ func NewClient(config Config) (*Client, error) {
 	}
 
 	// Enforce HTTPS for security (API keys are transmitted in headers)
-	if !strings.HasPrefix(config.Endpoint, "https://") {
+	if !strings.HasPrefix(config.Endpoint, "https://") && !isLocalEndpoint(config.Endpoint) {
 		return nil, fmt.Errorf("endpoint must use HTTPS for security")
 	}
 	if config.Timeout == 0 {
@@ -199,7 +201,12 @@ func (c *Client) flushLoop() {
 }
 
 // request makes an HTTP request with retry logic.
-func (c *Client) request(ctx context.Context, method, path string, body interface{}) ([]byte, error) {
+func (c *Client) request(
+	ctx context.Context,
+	method, path string,
+	body interface{},
+	forRegistration bool,
+) ([]byte, error) {
 	if !c.circuitBreaker.CanExecute() {
 		if c.config.FailOpen {
 			return []byte("{}"), nil
@@ -217,7 +224,7 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 		}
 	}
 
-	url := c.config.Endpoint + "/api/v1" + path
+	url := c.config.Endpoint + APIBasePath + path
 
 	var lastErr error
 	for attempt := 0; attempt <= c.config.MaxRetries; attempt++ {
@@ -234,7 +241,15 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", "zentinelle-go/0.1.0")
-		req.Header.Set("X-Zentinelle-Key", c.config.APIKey)
+
+		c.stateMu.RLock()
+		apiKey := c.config.APIKey
+		c.stateMu.RUnlock()
+		if forRegistration && strings.HasPrefix(apiKey, "bt_") {
+			req.Header.Set("X-Zentinelle-Bootstrap", apiKey)
+		} else {
+			req.Header.Set("X-Zentinelle-Key", apiKey)
+		}
 		if c.config.OrgID != "" {
 			req.Header.Set("X-Zentinelle-Org", c.config.OrgID)
 		}
@@ -258,7 +273,7 @@ func (c *Client) request(ctx context.Context, method, path string, body interfac
 		}
 
 		switch resp.StatusCode {
-		case http.StatusOK, http.StatusCreated:
+		case http.StatusOK, http.StatusCreated, http.StatusAccepted:
 			c.circuitBreaker.RecordSuccess()
 			return respBody, nil
 		case http.StatusUnauthorized:
@@ -314,7 +329,7 @@ func (c *Client) requestForEvaluate(ctx context.Context, method, path string, bo
 		return nil, false, &ConnectionError{Message: "circuit breaker is open"}
 	}
 
-	resp, err := c.request(ctx, method, path, body)
+	resp, err := c.request(ctx, method, path, body, false)
 	if err != nil {
 		if c.config.FailOpen {
 			if _, ok := err.(*ConnectionError); ok {
@@ -366,7 +381,7 @@ func (c *Client) Register(ctx context.Context, opts RegisterOptions) (*RegisterR
 		"name":         opts.Name,
 	}
 
-	resp, err := c.request(ctx, http.MethodPost, "/agents/register", body)
+	resp, err := c.request(ctx, http.MethodPost, "/register", body, true)
 	if err != nil {
 		return nil, err
 	}
@@ -383,25 +398,95 @@ func (c *Client) Register(ctx context.Context, opts RegisterOptions) (*RegisterR
 
 	c.stateMu.Lock()
 	c.agentID = result.AgentID
+	if result.APIKey != "" {
+		c.config.APIKey = result.APIKey
+	}
 	c.registered = true
 	c.stateMu.Unlock()
 
-	policies := make([]PolicyConfig, len(result.Policies))
-	for i, p := range result.Policies {
-		policies[i] = PolicyConfig{
-			ID:          getString(p, "id"),
-			Name:        getString(p, "name"),
-			Type:        getString(p, "type"),
-			Enforcement: getString(p, "enforcement"),
-			Config:      getMap(p, "config"),
-		}
-	}
+	policies := parsePolicyConfigs(result.Policies)
+
+	c.configCacheMu.Lock()
+	c.configCache = copyMap(result.Config)
+	c.configCacheTime = time.Now().UTC()
+	c.policiesCache = copyPolicies(policies)
+	c.configCacheMu.Unlock()
 
 	return &RegisterResult{
 		AgentID:  result.AgentID,
 		APIKey:   result.APIKey,
-		Config:   result.Config,
-		Policies: policies,
+		Config:   copyMap(result.Config),
+		Policies: copyPolicies(policies),
+	}, nil
+}
+
+// GetConfig retrieves config and policies for the current agent.
+func (c *Client) GetConfig(ctx context.Context) (*ConfigResult, error) {
+	return c.GetConfigWithRefresh(ctx, false)
+}
+
+// GetConfigWithRefresh retrieves config with optional cache bypass.
+func (c *Client) GetConfigWithRefresh(ctx context.Context, forceRefresh bool) (*ConfigResult, error) {
+	c.stateMu.RLock()
+	agentID := c.agentID
+	c.stateMu.RUnlock()
+
+	if agentID == "" {
+		return nil, fmt.Errorf("agent not registered")
+	}
+
+	if !forceRefresh {
+		c.configCacheMu.RLock()
+		if c.configCache != nil && time.Since(c.configCacheTime) < c.config.ConfigCacheTTL {
+			config := copyMap(c.configCache)
+			policies := copyPolicies(c.policiesCache)
+			updatedAt := c.configCacheTime.UTC().Format(time.RFC3339)
+			c.configCacheMu.RUnlock()
+			return &ConfigResult{
+				AgentID:   agentID,
+				Config:    config,
+				Policies:  policies,
+				UpdatedAt: updatedAt,
+			}, nil
+		}
+		c.configCacheMu.RUnlock()
+	}
+
+	resp, err := c.request(ctx, http.MethodGet, "/config/"+agentID, nil, false)
+	if err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		AgentID   string                   `json:"agent_id"`
+		Config    map[string]interface{}   `json:"config"`
+		Policies  []map[string]interface{} `json:"policies"`
+		UpdatedAt string                   `json:"updated_at"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+
+	if result.AgentID == "" {
+		result.AgentID = agentID
+	}
+	if result.UpdatedAt == "" {
+		result.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+
+	policies := parsePolicyConfigs(result.Policies)
+
+	c.configCacheMu.Lock()
+	c.configCache = copyMap(result.Config)
+	c.configCacheTime = time.Now().UTC()
+	c.policiesCache = copyPolicies(policies)
+	c.configCacheMu.Unlock()
+
+	return &ConfigResult{
+		AgentID:   result.AgentID,
+		Config:    copyMap(result.Config),
+		Policies:  copyPolicies(policies),
+		UpdatedAt: result.UpdatedAt,
 	}, nil
 }
 
@@ -544,7 +629,7 @@ func (c *Client) GetSecretsWithRefresh(ctx context.Context, forceRefresh bool) (
 	}
 
 	// Fetch fresh secrets
-	resp, err := c.request(ctx, http.MethodGet, "/agents/"+agentID+"/secrets", nil)
+	resp, err := c.request(ctx, http.MethodGet, "/secrets/"+agentID, nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -558,13 +643,10 @@ func (c *Client) GetSecretsWithRefresh(ctx context.Context, forceRefresh bool) (
 
 	// Update cache and return a copy to prevent caller modification corrupting cache
 	c.secretsCacheMu.Lock()
-	c.secretsCache = result.Secrets
+	c.secretsCache = copyStringMap(result.Secrets)
 	c.secretsCacheTime = time.Now()
 	// Return a copy to prevent modification
-	secrets := make(map[string]string, len(c.secretsCache))
-	for k, v := range c.secretsCache {
-		secrets[k] = v
-	}
+	secrets := copyStringMap(c.secretsCache)
 	c.secretsCacheMu.Unlock()
 
 	return secrets, nil
@@ -644,7 +726,7 @@ func (c *Client) FlushEvents(ctx context.Context) error {
 		"events":   events,
 	}
 
-	_, err := c.request(ctx, http.MethodPost, "/events", body)
+	_, err := c.request(ctx, http.MethodPost, "/events", body, false)
 	if err != nil {
 		// Re-queue events on failure (check against maxBufferSize to avoid overflow)
 		c.bufferMu.Lock()
@@ -660,15 +742,25 @@ func (c *Client) FlushEvents(ctx context.Context) error {
 	return nil
 }
 
-// Heartbeat sends a heartbeat.
-func (c *Client) Heartbeat(ctx context.Context, status string, metrics map[string]interface{}) error {
+// Heartbeat sends a heartbeat and returns the service response.
+func (c *Client) Heartbeat(
+	ctx context.Context,
+	status string,
+	metrics map[string]interface{},
+) (*HeartbeatResult, error) {
 	c.stateMu.RLock()
 	registered := c.registered
 	agentID := c.agentID
 	c.stateMu.RUnlock()
 
 	if !registered || agentID == "" {
-		return nil
+		return nil, nil
+	}
+	if status == "" {
+		status = "healthy"
+	}
+	if metrics == nil {
+		metrics = map[string]interface{}{}
 	}
 
 	body := map[string]interface{}{
@@ -677,8 +769,31 @@ func (c *Client) Heartbeat(ctx context.Context, status string, metrics map[strin
 		"metrics":  metrics,
 	}
 
-	_, err := c.request(ctx, http.MethodPost, "/heartbeat", body)
-	return err
+	resp, err := c.request(ctx, http.MethodPost, "/heartbeat", body, false)
+	if err != nil {
+		return nil, err
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		return nil, err
+	}
+
+	acknowledged := true
+	if ack, ok := result["acknowledged"].(bool); ok {
+		acknowledged = ack
+	}
+
+	nextHeartbeatSeconds := 60
+	if next, ok := result["next_heartbeat_seconds"].(float64); ok {
+		nextHeartbeatSeconds = int(next)
+	}
+
+	return &HeartbeatResult{
+		Acknowledged:         acknowledged,
+		ConfigChanged:        getBool(result, "config_changed") || getBool(result, "drift_detected") || getBool(result, "sync_required"),
+		NextHeartbeatSeconds: nextHeartbeatSeconds,
+	}, nil
 }
 
 // Shutdown gracefully shuts down the client.
@@ -743,4 +858,56 @@ func getMap(m map[string]interface{}, key string) map[string]interface{} {
 		return v
 	}
 	return nil
+}
+
+func parsePolicyConfigs(policies []map[string]interface{}) []PolicyConfig {
+	parsed := make([]PolicyConfig, len(policies))
+	for i, p := range policies {
+		parsed[i] = PolicyConfig{
+			ID:          getString(p, "id"),
+			Name:        getString(p, "name"),
+			Type:        getString(p, "type"),
+			Enforcement: getString(p, "enforcement"),
+			Config:      copyMap(getMap(p, "config")),
+		}
+	}
+	return parsed
+}
+
+func copyMap(src map[string]interface{}) map[string]interface{} {
+	if src == nil {
+		return map[string]interface{}{}
+	}
+	dst := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func copyStringMap(src map[string]string) map[string]string {
+	if src == nil {
+		return map[string]string{}
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func copyPolicies(src []PolicyConfig) []PolicyConfig {
+	if src == nil {
+		return []PolicyConfig{}
+	}
+	dst := make([]PolicyConfig, len(src))
+	copy(dst, src)
+	for i := range dst {
+		dst[i].Config = copyMap(src[i].Config)
+	}
+	return dst
+}
+
+func isLocalEndpoint(endpoint string) bool {
+	return strings.Contains(endpoint, "localhost") || strings.Contains(endpoint, "127.0.0.1")
 }

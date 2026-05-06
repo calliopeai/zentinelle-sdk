@@ -28,38 +28,40 @@ public class EvaluateResult
     /// <summary>
     /// Individual policy evaluations.
     /// </summary>
-    [JsonPropertyName("policies")]
-    public List<PolicyEvaluation>? Policies { get; set; }
+    [JsonPropertyName("policies_evaluated")]
+    public List<PolicyEvaluation> PoliciesEvaluated { get; set; } = new();
 
     /// <summary>
-    /// Whether human approval is required.
+    /// Warnings returned by the service.
     /// </summary>
-    [JsonPropertyName("requires_approval")]
-    public bool RequiresApproval { get; set; }
+    [JsonPropertyName("warnings")]
+    public List<string> Warnings { get; set; } = new();
 
     /// <summary>
-    /// Workflow ID for approval requests.
+    /// Additional evaluation context.
     /// </summary>
-    [JsonPropertyName("approval_workflow_id")]
-    public string? ApprovalWorkflowId { get; set; }
-
-    /// <summary>
-    /// Metadata from the evaluation.
-    /// </summary>
-    [JsonPropertyName("metadata")]
-    public Dictionary<string, object>? Metadata { get; set; }
+    [JsonPropertyName("context")]
+    public Dictionary<string, object> Context { get; set; } = new();
 
     /// <summary>
     /// Checks if any policy blocked the action.
     /// </summary>
-    public bool IsBlocked => !Allowed && !RequiresApproval;
+    public bool IsBlocked => !Allowed;
+
+    /// <summary>
+    /// Whether human approval is required.
+    /// </summary>
+    public bool RequiresHumanApproval =>
+        Context.TryGetValue("require_human_approval", out var value) &&
+        value is bool required &&
+        required;
 
     /// <summary>
     /// Gets the policies that blocked the action.
     /// </summary>
     public IEnumerable<PolicyEvaluation> GetBlockingPolicies()
     {
-        return Policies?.Where(p => !p.Passed) ?? Enumerable.Empty<PolicyEvaluation>();
+        return PoliciesEvaluated.Where(p => !p.Passed);
     }
 }
 
@@ -71,8 +73,8 @@ public class PolicyEvaluation
     /// <summary>
     /// Name of the policy.
     /// </summary>
-    [JsonPropertyName("policy")]
-    public string? Policy { get; set; }
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
 
     /// <summary>
     /// Type of the policy.
@@ -87,14 +89,8 @@ public class PolicyEvaluation
     public bool Passed { get; set; }
 
     /// <summary>
-    /// Reason for the policy decision.
+    /// Human-readable message for the policy result.
     /// </summary>
-    [JsonPropertyName("reason")]
-    public string? Reason { get; set; }
-
-    /// <summary>
-    /// Severity level if policy failed.
-    /// </summary>
-    [JsonPropertyName("severity")]
-    public string? Severity { get; set; }
+    [JsonPropertyName("message")]
+    public string? Message { get; set; }
 }

@@ -70,7 +70,9 @@ zentinelle-sdk/
 
 ## Core API
 
-All language implementations expose the same logical interface. Method names follow language conventions (snake_case for Python/Go, camelCase for TypeScript/Java/C#).
+All language implementations are intended to expose the same logical interface. Method names follow language conventions (snake_case for Python, exported PascalCase for Go, camelCase for TypeScript/Java/C#).
+
+Python, TypeScript, Go, Java, and C# now target the same canonical service contract documented below. The remaining gap is validation breadth: Python, TypeScript, Go, and Java have targeted contract tests in-repo, while C# is aligned in source but still needs a `dotnet`-enabled environment for build/test verification; see [memory.md](memory.md).
 
 ### Client Initialization
 
@@ -79,7 +81,7 @@ All language implementations expose the same logical interface. Method names fol
 from zentinelle import ZentinelleClient
 
 client = ZentinelleClient(
-    api_key="sk_agent_...",      # required; prefixes: sk_agent_, sk_test_, sk_live_, znt_
+    api_key="bt_<tenant_id>_<signature>",  # bootstrap token for first register(); use sk_agent_* for an existing agent
     agent_type="langchain",      # required; identifies the framework type
     endpoint="https://api.zentinelle.ai",  # optional; defaults to cloud
     agent_id="my-agent",         # optional; generated on register() if omitted
@@ -99,7 +101,7 @@ client = ZentinelleClient(
 import { ZentinelleClient } from 'zentinelle';
 
 const client = new ZentinelleClient({
-  apiKey: 'sk_agent_...',
+  apiKey: 'bt_<tenant_id>_<signature>',
   agentType: 'langchain',
   endpoint: 'https://api.zentinelle.ai',  // optional
   failOpen: false,
@@ -115,7 +117,7 @@ const client = new ZentinelleClient({
 import "github.com/calliopeai/zentinelle-go/zentinelle"
 
 client, err := zentinelle.NewClient(zentinelle.Config{
-    APIKey:    "sk_agent_...",
+    APIKey:    "bt_<tenant_id>_<signature>",
     AgentType: "go-agent",
     FailOpen:  false,
 })
@@ -126,6 +128,9 @@ defer client.Shutdown()
 
 Register the agent on startup. Returns agent ID, config, and initial policies. Must be called before `evaluate()`, `get_config()`, or `get_secrets()`.
 
+The first `register()` call uses a bootstrap token (`bt_*`) and receives the runtime
+agent key (`sk_agent_*`) that the client uses for subsequent requests.
+
 ```python
 result = client.register(
     capabilities=["chat", "tools", "code"],
@@ -135,7 +140,7 @@ result = client.register(
 # result.agent_id, result.config, result.policies
 ```
 
-API endpoint: `POST /api/v1/agents/register`
+API endpoint: `POST /api/zentinelle/v1/register`
 
 ### evaluate()
 
@@ -155,7 +160,7 @@ Convenience wrappers: `can_call_tool(tool_name, user_id)`, `can_use_model(model,
 
 In fail-open mode, returns `EvaluateResult(allowed=True, fail_open=True)` when the service is unreachable. The `fail_open` flag is always set so callers can detect degraded operation.
 
-API endpoint: `POST /api/v1/evaluate`
+API endpoint: `POST /api/zentinelle/v1/evaluate`
 
 ### emit()
 
@@ -174,7 +179,7 @@ client.emit_model_request("openai", "gpt-4o", input_tokens=800, output_tokens=30
 client.track_usage(ModelUsage.from_openai(openai_response))
 ```
 
-API endpoint: `POST /api/v1/events` (batch)
+API endpoint: `POST /api/zentinelle/v1/events` (batch)
 
 ### get_config()
 
@@ -186,7 +191,7 @@ config = client.get_config(force_refresh=True)  # bypass cache
 # config.config (dict), config.policies (list[PolicyConfig])
 ```
 
-API endpoint: `GET /api/v1/agents/{agent_id}/config`
+API endpoint: `GET /api/zentinelle/v1/config/{agent_id}`
 
 ### get_secrets()
 
@@ -199,7 +204,7 @@ openai_key = secrets["OPENAI_API_KEY"]
 key = client.get_secret("OPENAI_API_KEY", default=None)
 ```
 
-API endpoint: `GET /api/v1/agents/{agent_id}/secrets`
+API endpoint: `GET /api/zentinelle/v1/secrets/{agent_id}`
 
 ### heartbeat()
 
@@ -210,7 +215,7 @@ result = client.heartbeat(status="healthy", metrics={"queue_depth": 5})
 # result.acknowledged, result.config_changed, result.next_heartbeat_seconds
 ```
 
-API endpoint: `POST /api/v1/heartbeat`
+API endpoint: `POST /api/zentinelle/v1/heartbeat`
 
 ### shutdown()
 
@@ -228,9 +233,10 @@ with ZentinelleClient(...) as client:
 ## HTTP Transport
 
 All requests use:
-- Header `X-Zentinelle-Key: <api_key>`
+- `register()` with a bootstrap token uses `X-Zentinelle-Bootstrap: <bootstrap_token>`
+- Runtime requests use `X-Zentinelle-Key: <api_key>`
 - Header `X-Zentinelle-Org: <org_id>` (if set)
-- Base URL: `<endpoint>/api/v1`
+- Base URL: `<endpoint>/api/zentinelle/v1`
 - HTTPS enforced (localhost/127.0.0.1 exempt for local dev)
 
 Error handling:
@@ -449,7 +455,7 @@ The Go module uses a separate tag prefix (`go/vX.Y.Z`) per Go module conventions
 
 ## API Key Format
 
-Valid prefixes: `sk_agent_`, `sk_test_`, `sk_live_`, `znt_`
+Valid prefixes: `sk_agent_`, `sk_test_`, `sk_live_`, `znt_`, `bt_`
 
 The SDK logs a warning (but does not error) if the key doesn't match a known prefix.
 

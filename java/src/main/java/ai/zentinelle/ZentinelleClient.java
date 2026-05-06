@@ -67,8 +67,9 @@ public class ZentinelleClient implements AutoCloseable {
     private static final int DEFAULT_MAX_RETRIES = 3;
     private static final int DEFAULT_BUFFER_SIZE = 100;
     private static final Duration DEFAULT_FLUSH_INTERVAL = Duration.ofSeconds(5);
+    private static final String API_BASE_PATH = "/api/zentinelle/v1";
 
-    private final String apiKey;
+    private volatile String apiKey;
     private final String agentType;
     private final String endpoint;
     private final String orgId;
@@ -94,6 +95,11 @@ public class ZentinelleClient implements AutoCloseable {
     private volatile Instant secretsCacheTime = null;
     private final Duration secretsCacheTtl;
     private final Object secretsCacheLock = new Object();
+    private volatile Map<String, Object> configCache = null;
+    private volatile Instant configCacheTime = null;
+    private volatile List<PolicyConfig> policiesCache = List.of();
+    private final Duration configCacheTtl;
+    private final Object configCacheLock = new Object();
 
     private ZentinelleClient(Builder builder) {
         this.apiKey = Objects.requireNonNull(builder.apiKey, "apiKey is required");
@@ -102,14 +108,15 @@ public class ZentinelleClient implements AutoCloseable {
         }
         // Validate API key format (should start with known prefixes)
         if (!this.apiKey.startsWith("sk_agent_") && !this.apiKey.startsWith("sk_test_") &&
-            !this.apiKey.startsWith("sk_live_") && !this.apiKey.startsWith("znt_")) {
-            log.warn("API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*). " +
+            !this.apiKey.startsWith("sk_live_") && !this.apiKey.startsWith("znt_") &&
+            !this.apiKey.startsWith("bt_")) {
+            log.warn("API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*, bt_*). " +
                 "This may indicate an invalid key.");
         }
         this.agentType = Objects.requireNonNull(builder.agentType, "agentType is required");
-        this.endpoint = builder.endpoint != null ? builder.endpoint : DEFAULT_ENDPOINT;
+        this.endpoint = (builder.endpoint != null ? builder.endpoint : DEFAULT_ENDPOINT).replaceAll("/+$", "");
         // Enforce HTTPS for security (API keys are transmitted in headers)
-        if (!this.endpoint.startsWith("https://")) {
+        if (!this.endpoint.startsWith("https://") && !isLocalEndpoint(this.endpoint)) {
             throw new IllegalArgumentException("endpoint must use HTTPS for security");
         }
         this.orgId = builder.orgId;
@@ -138,6 +145,7 @@ public class ZentinelleClient implements AutoCloseable {
 
         // Secrets cache TTL (default 60 seconds)
         this.secretsCacheTtl = builder.secretsCacheTtl != null ? builder.secretsCacheTtl : Duration.ofSeconds(60);
+        this.configCacheTtl = builder.configCacheTtl != null ? builder.configCacheTtl : Duration.ofSeconds(300);
 
         // Start background flush
         Duration flushInterval = builder.flushInterval != null ? builder.flushInterval : DEFAULT_FLUSH_INTERVAL;
@@ -171,19 +179,31 @@ public class ZentinelleClient implements AutoCloseable {
      * @throws ZentinelleException if registration fails
      */
     public RegisterResult register(RegisterOptions options) throws ZentinelleException {
+        RegisterOptions registerOptions = options != null ? options : RegisterOptions.builder().build();
         Map<String, Object> body = new HashMap<>();
         body.put("agent_id", agentId);
         body.put("agent_type", agentType);
-        body.put("capabilities", options.getCapabilities());
-        body.put("metadata", options.getMetadata());
-        body.put("name", options.getName());
+        body.put("capabilities", registerOptions.getCapabilities());
+        body.put("metadata", registerOptions.getMetadata());
+        body.put("name", registerOptions.getName());
 
-        Map<String, Object> response = request("POST", "/agents/register", body);
+        Map<String, Object> response = request("POST", "/register", body, true);
+        Map<String, Object> config = copyMap(castToMap(response.get("config")));
+        List<PolicyConfig> policies = copyPolicies(parsePolicies(response.get("policies")));
 
         // Atomically update agentId and registered flag to prevent race conditions
         synchronized (registrationLock) {
             this.agentId = (String) response.get("agent_id");
+            if (response.get("api_key") instanceof String runtimeApiKey && !runtimeApiKey.isBlank()) {
+                this.apiKey = runtimeApiKey;
+            }
             this.registered.set(true);
+        }
+
+        synchronized (configCacheLock) {
+            this.configCache = config;
+            this.configCacheTime = Instant.now();
+            this.policiesCache = policies;
         }
 
         log.info("Registered agent: {}", agentId);
@@ -191,8 +211,8 @@ public class ZentinelleClient implements AutoCloseable {
         return RegisterResult.builder()
             .agentId(agentId)
             .apiKey((String) response.get("api_key"))
-            .config(castToMap(response.get("config")))
-            .policies(parsePolicies(response.get("policies")))
+            .config(config)
+            .policies(copyPolicies(policies))
             .build();
     }
 
@@ -205,6 +225,7 @@ public class ZentinelleClient implements AutoCloseable {
      * @throws ZentinelleException if evaluation fails
      */
     public EvaluateResult evaluate(String action, EvaluateOptions options) throws ZentinelleException {
+        requireAgentId();
         Map<String, Object> body = new HashMap<>();
         body.put("agent_id", agentId);
         body.put("action", action);
@@ -261,6 +282,53 @@ public class ZentinelleClient implements AutoCloseable {
     }
 
     /**
+     * Retrieves config and policies for the agent (cached).
+     */
+    public ConfigResult getConfig() throws ZentinelleException {
+        return getConfig(false);
+    }
+
+    /**
+     * Retrieves config and policies for the agent with optional cache bypass.
+     */
+    public ConfigResult getConfig(boolean forceRefresh) throws ZentinelleException {
+        requireAgentId();
+
+        if (!forceRefresh) {
+            synchronized (configCacheLock) {
+                if (configCache != null && configCacheTime != null &&
+                    Duration.between(configCacheTime, Instant.now()).compareTo(configCacheTtl) < 0) {
+                    return ConfigResult.builder()
+                        .agentId(agentId)
+                        .config(copyMap(configCache))
+                        .policies(copyPolicies(policiesCache))
+                        .updatedAt(configCacheTime)
+                        .build();
+                }
+            }
+        }
+
+        Map<String, Object> response = request("GET", "/config/" + agentId, null);
+        Map<String, Object> config = copyMap(castToMap(response.get("config")));
+        List<PolicyConfig> policies = copyPolicies(parsePolicies(response.get("policies")));
+        Instant updatedAt = parseInstant(response.get("updated_at"), Instant.now());
+        String responseAgentId = response.get("agent_id") instanceof String value ? value : agentId;
+
+        synchronized (configCacheLock) {
+            configCache = config;
+            configCacheTime = updatedAt;
+            policiesCache = policies;
+        }
+
+        return ConfigResult.builder()
+            .agentId(responseAgentId)
+            .config(copyMap(config))
+            .policies(copyPolicies(policies))
+            .updatedAt(updatedAt)
+            .build();
+    }
+
+    /**
      * Retrieves secrets for the agent (cached).
      */
     public Map<String, String> getSecrets() throws ZentinelleException {
@@ -274,6 +342,7 @@ public class ZentinelleClient implements AutoCloseable {
      * @return map of secret name to value
      */
     public Map<String, String> getSecrets(boolean forceRefresh) throws ZentinelleException {
+        requireAgentId();
         // Thread-safe cache check
         if (!forceRefresh) {
             synchronized (secretsCacheLock) {
@@ -285,8 +354,8 @@ public class ZentinelleClient implements AutoCloseable {
             }
         }
 
-        Map<String, Object> response = request("GET", "/agents/" + agentId + "/secrets", null);
-        Map<String, String> secrets = castToStringMap(response.get("secrets"));
+        Map<String, Object> response = request("GET", "/secrets/" + agentId, null);
+        Map<String, String> secrets = copyStringMap(castToStringMap(response.get("secrets")));
 
         // Update cache
         synchronized (secretsCacheLock) {
@@ -398,14 +467,30 @@ public class ZentinelleClient implements AutoCloseable {
     /**
      * Sends a heartbeat.
      */
-    public void heartbeat(String status, Map<String, Object> metrics) throws ZentinelleException {
-        if (!registered.get() || agentId == null) return;
+    public HeartbeatResult heartbeat(String status, Map<String, Object> metrics) throws ZentinelleException {
+        if (!registered.get() || agentId == null) {
+            return null;
+        }
 
-        request("POST", "/heartbeat", Map.of(
+        String heartbeatStatus = (status == null || status.isBlank()) ? "healthy" : status;
+        Map<String, Object> response = request("POST", "/heartbeat", Map.of(
             "agent_id", agentId,
-            "status", status,
+            "status", heartbeatStatus,
             "metrics", metrics != null ? metrics : Map.of()
         ));
+
+        boolean configChanged = Boolean.TRUE.equals(response.get("config_changed")) ||
+            Boolean.TRUE.equals(response.get("drift_detected")) ||
+            Boolean.TRUE.equals(response.get("sync_required"));
+        int nextHeartbeatSeconds = response.get("next_heartbeat_seconds") instanceof Number value
+            ? value.intValue()
+            : 60;
+
+        return HeartbeatResult.builder()
+            .acknowledged(response.get("acknowledged") instanceof Boolean value ? value : true)
+            .configChanged(configChanged)
+            .nextHeartbeatSeconds(nextHeartbeatSeconds)
+            .build();
     }
 
     /**
@@ -482,7 +567,7 @@ public class ZentinelleClient implements AutoCloseable {
         }
 
         try {
-            return request(method, path, body);
+            return request(method, path, body, false);
         } catch (ConnectionException e) {
             if (failOpen) {
                 log.warn("Request failed, failing open: {}", e.getMessage());
@@ -506,6 +591,11 @@ public class ZentinelleClient implements AutoCloseable {
     // HTTP request handling
     private Map<String, Object> request(String method, String path, Map<String, Object> body)
             throws ZentinelleException {
+        return request(method, path, body, false);
+    }
+
+    private Map<String, Object> request(String method, String path, Map<String, Object> body, boolean forRegistration)
+            throws ZentinelleException {
 
         if (!circuitBreaker.canExecute()) {
             if (failOpen) {
@@ -514,7 +604,7 @@ public class ZentinelleClient implements AutoCloseable {
             throw new ConnectionException("Circuit breaker is open");
         }
 
-        String url = endpoint + "/api/v1" + path;
+        String url = endpoint + API_BASE_PATH + path;
         ZentinelleException lastException = null;
 
         for (int attempt = 0; attempt <= maxRetries; attempt++) {
@@ -522,8 +612,14 @@ public class ZentinelleClient implements AutoCloseable {
                 Request.Builder requestBuilder = new Request.Builder()
                     .url(url)
                     .header("Content-Type", "application/json")
-                    .header("User-Agent", "zentinelle-java/0.1.0")
-                    .header("X-Zentinelle-Key", apiKey);
+                    .header("User-Agent", "zentinelle-java/0.1.0");
+
+                String currentApiKey = apiKey;
+                if (forRegistration && currentApiKey.startsWith("bt_")) {
+                    requestBuilder.header("X-Zentinelle-Bootstrap", currentApiKey);
+                } else {
+                    requestBuilder.header("X-Zentinelle-Key", currentApiKey);
+                }
 
                 if (orgId != null) {
                     requestBuilder.header("X-Zentinelle-Org", orgId);
@@ -572,7 +668,7 @@ public class ZentinelleClient implements AutoCloseable {
         String body = response.body() != null ? response.body().string() : "";
 
         switch (code) {
-            case 200, 201 -> {
+            case 200, 201, 202 -> {
                 circuitBreaker.recordSuccess();
                 return objectMapper.readValue(body, Map.class);
             }
@@ -650,7 +746,7 @@ public class ZentinelleClient implements AutoCloseable {
                 .name((String) m.get("name"))
                 .type((String) m.get("type"))
                 .enforcement((String) m.get("enforcement"))
-                .config(castToMap(m.get("config")))
+                .config(copyMap(castToMap(m.get("config"))))
                 .build())
             .toList();
     }
@@ -683,6 +779,51 @@ public class ZentinelleClient implements AutoCloseable {
             .toList();
     }
 
+    private void requireAgentId() throws ZentinelleException {
+        if (agentId == null || agentId.isBlank()) {
+            throw new ZentinelleException("Agent not registered. Call register() first or provide agentId.");
+        }
+    }
+
+    private Map<String, Object> copyMap(Map<String, Object> source) {
+        return source == null ? Map.of() : new HashMap<>(source);
+    }
+
+    private Map<String, String> copyStringMap(Map<String, String> source) {
+        return source == null ? Map.of() : new HashMap<>(source);
+    }
+
+    private List<PolicyConfig> copyPolicies(List<PolicyConfig> source) {
+        if (source == null || source.isEmpty()) {
+            return List.of();
+        }
+        return source.stream()
+            .map(policy -> PolicyConfig.builder()
+                .id(policy.getId())
+                .name(policy.getName())
+                .type(policy.getType())
+                .enforcement(policy.getEnforcement())
+                .config(copyMap(policy.getConfig()))
+                .priority(policy.getPriority())
+                .build())
+            .toList();
+    }
+
+    private Instant parseInstant(Object value, Instant defaultValue) {
+        if (value instanceof String timestamp && !timestamp.isBlank()) {
+            try {
+                return Instant.parse(timestamp);
+            } catch (Exception ignored) {
+                return defaultValue;
+            }
+        }
+        return defaultValue;
+    }
+
+    private static boolean isLocalEndpoint(String endpoint) {
+        return endpoint.contains("localhost") || endpoint.contains("127.0.0.1");
+    }
+
     /**
      * Builder for ZentinelleClient.
      */
@@ -700,6 +841,7 @@ public class ZentinelleClient implements AutoCloseable {
         private int circuitBreakerThreshold;
         private Duration circuitBreakerTimeout;
         private Duration secretsCacheTtl;
+        private Duration configCacheTtl;
 
         public Builder apiKey(String apiKey) { this.apiKey = apiKey; return this; }
         public Builder agentType(String agentType) { this.agentType = agentType; return this; }
@@ -714,6 +856,7 @@ public class ZentinelleClient implements AutoCloseable {
         public Builder circuitBreakerThreshold(int threshold) { this.circuitBreakerThreshold = threshold; return this; }
         public Builder circuitBreakerTimeout(Duration timeout) { this.circuitBreakerTimeout = timeout; return this; }
         public Builder secretsCacheTtl(Duration ttl) { this.secretsCacheTtl = ttl; return this; }
+        public Builder configCacheTtl(Duration ttl) { this.configCacheTtl = ttl; return this; }
 
         public ZentinelleClient build() {
             return new ZentinelleClient(this);

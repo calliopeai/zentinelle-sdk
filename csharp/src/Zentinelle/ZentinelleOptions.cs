@@ -11,9 +11,9 @@ public class ZentinelleOptions
     public required string ApiKey { get; set; }
 
     /// <summary>
-    /// The agent ID to use for requests. Required.
+    /// Optional agent ID to use for requests before registration.
     /// </summary>
-    public required string AgentId { get; set; }
+    public string? AgentId { get; set; }
 
     /// <summary>
     /// The type of agent (e.g., "langchain", "crewai", "custom"). Required.
@@ -24,6 +24,11 @@ public class ZentinelleOptions
     /// Base URL for the Zentinelle API.
     /// </summary>
     public string BaseUrl { get; set; } = "https://api.zentinelle.ai";
+
+    /// <summary>
+    /// Optional organization header for multi-tenant routing.
+    /// </summary>
+    public string? OrgId { get; set; }
 
     /// <summary>
     /// HTTP request timeout.
@@ -38,7 +43,7 @@ public class ZentinelleOptions
     /// <summary>
     /// Whether to allow actions when Zentinelle is unreachable.
     /// </summary>
-    public bool FailOpen { get; set; } = true;
+    public bool FailOpen { get; set; } = false;
 
     /// <summary>
     /// Number of failures before the circuit breaker opens.
@@ -53,7 +58,7 @@ public class ZentinelleOptions
     /// <summary>
     /// Interval between heartbeat requests.
     /// </summary>
-    public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(30);
+    public TimeSpan HeartbeatInterval { get; set; } = TimeSpan.FromSeconds(60);
 
     /// <summary>
     /// Interval between event buffer flushes.
@@ -69,4 +74,9 @@ public class ZentinelleOptions
     /// How long to cache configuration responses.
     /// </summary>
     public TimeSpan ConfigCacheDuration { get; set; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// How long to cache secrets responses.
+    /// </summary>
+    public TimeSpan SecretsCacheDuration { get; set; } = TimeSpan.FromSeconds(60);
 }

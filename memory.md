@@ -67,9 +67,15 @@ Config cached 5 minutes, secrets cached 60 seconds. Thread-safe with copy-on-rea
 
 The endpoint must use HTTPS (localhost/127.0.0.1 exempt for local development). The API key is sent in the `X-Zentinelle-Key` header.
 
+### Service Contract Alignment
+
+Canonical Zentinelle REST paths live under `/api/zentinelle/v1`. Agent registration is a two-step credential flow: call `register()` with a bootstrap token in `X-Zentinelle-Bootstrap`, then use the returned `sk_agent_*` key for runtime requests in `X-Zentinelle-Key`.
+
+As of 2026-04-09, the Python, TypeScript, Go, Java, and C# SDKs all target this contract in source. Targeted contract tests now cover Python, TypeScript, Go, and Java. C# still needs build/test verification in an environment with `dotnet` installed.
+
 ### Thread Safety
 
-Python: threading.Lock for buffer and cache. Go: sync.RWMutex with separate locks for state, buffer, secrets cache, and config cache. TypeScript: single-threaded event loop, `flushInProgress` guard to prevent concurrent flushes.
+Python: threading.Lock for buffer and cache. Go: sync.RWMutex with separate locks for state, buffer, secrets cache, and config cache. TypeScript: single-threaded event loop, `flushInProgress` guard to prevent concurrent flushes. Java: synchronized cache locks plus AtomicBoolean/volatile state. C#: explicit locks for state, config cache, and secrets cache around a shared HttpClient.
 
 ---
 

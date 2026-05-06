@@ -221,6 +221,19 @@ class TestZentinelleClientHeaders:
             assert headers['Content-Type'] == "application/json"
             client._running = False
 
+    def test_registration_headers_use_bootstrap_token(self):
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                endpoint="https://api.zentinelle.ai",
+                api_key="bt_test_bootstrap_123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            headers = client._headers(for_registration=True)
+            assert headers['X-Zentinelle-Bootstrap'] == "bt_test_bootstrap_123"
+            assert 'X-Zentinelle-Key' not in headers
+            client._running = False
+
     def test_headers_with_org_id(self):
         with patch.object(ZentinelleClient, '_flush_loop'):
             client = ZentinelleClient(
@@ -456,6 +469,87 @@ class TestRegister:
             assert len(result.policies) == 1
             assert client.agent_id == 'new-agent-id'
             assert client._registered is True
+            client._running = False
+
+    @patch('requests.post')
+    def test_register_uses_service_contract(self, mock_post):
+        """register() should target the canonical service path and bootstrap header."""
+        mock_response = Mock()
+        mock_response.status_code = 201
+        mock_response.json.return_value = {
+            'agent_id': 'new-agent-id',
+            'api_key': 'sk_agent_runtime_123',
+            'config': {'setting': 'value'},
+            'policies': [],
+        }
+        mock_post.return_value = mock_response
+
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                endpoint="https://api.zentinelle.ai",
+                api_key="bt_test_bootstrap_123",
+                agent_type="test",
+                auto_heartbeat=False,
+            )
+            client.register(name='Contract Agent')
+
+            mock_post.assert_called_once()
+            _, kwargs = mock_post.call_args
+            assert mock_post.call_args.args[0] == "https://api.zentinelle.ai/api/zentinelle/v1/register"
+            assert kwargs['headers']['X-Zentinelle-Bootstrap'] == "bt_test_bootstrap_123"
+            assert kwargs['json']['name'] == 'Contract Agent'
+            assert client.api_key == 'sk_agent_runtime_123'
+            client._running = False
+
+
+class TestServicePaths:
+    """Tests for canonical service paths."""
+
+    @patch('requests.get')
+    def test_get_config_uses_canonical_path(self, mock_get):
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'agent_id': 'test-agent',
+            'config': {},
+            'policies': [],
+            'updated_at': '2025-01-01T00:00:00Z',
+        }
+        mock_get.return_value = mock_response
+
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                endpoint="https://api.zentinelle.ai",
+                api_key="sk_agent_runtime_123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            client.get_config(force_refresh=True)
+
+            mock_get.assert_called_once()
+            assert mock_get.call_args.args[0] == "https://api.zentinelle.ai/api/zentinelle/v1/config/test-agent"
+            client._running = False
+
+    @patch('requests.get')
+    def test_get_secrets_uses_canonical_path(self, mock_get):
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {'secrets': {}}
+        mock_get.return_value = mock_response
+
+        with patch.object(ZentinelleClient, '_flush_loop'):
+            client = ZentinelleClient(
+                endpoint="https://api.zentinelle.ai",
+                api_key="sk_agent_runtime_123",
+                agent_type="test",
+                agent_id="test-agent",
+                auto_heartbeat=False,
+            )
+            client.get_secrets(force_refresh=True)
+
+            mock_get.assert_called_once()
+            assert mock_get.call_args.args[0] == "https://api.zentinelle.ai/api/zentinelle/v1/secrets/test-agent"
             client._running = False
 
 

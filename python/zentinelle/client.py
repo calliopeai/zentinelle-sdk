@@ -207,6 +207,7 @@ class ZentinelleClient:
     """
 
     DEFAULT_ENDPOINT = "https://api.zentinelle.ai"
+    API_BASE_PATH = "/api/zentinelle/v1"
 
     def __init__(
         self,
@@ -254,11 +255,11 @@ class ZentinelleClient:
         # Validate required parameters
         if not api_key or len(api_key) < 10:
             raise ValueError("api_key is required and must be at least 10 characters")
-        # Validate API key format (should start with sk_agent_ or similar prefix)
-        valid_prefixes = ('sk_agent_', 'sk_test_', 'sk_live_', 'znt_')
+        # Validate API key format (agent runtime key or bootstrap token)
+        valid_prefixes = ('sk_agent_', 'sk_test_', 'sk_live_', 'znt_', 'bt_')
         if not any(api_key.startswith(prefix) for prefix in valid_prefixes):
             logger.warning(
-                "API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*). "
+                "API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*, bt_*). "
                 "This may indicate an invalid key."
             )
         if not agent_type:
@@ -331,14 +332,17 @@ class ZentinelleClient:
     # HTTP Helpers
     # =========================================================================
 
-    def _headers(self) -> Dict[str, str]:
+    def _headers(self, for_registration: bool = False) -> Dict[str, str]:
         """Get request headers."""
         headers = {
             'Content-Type': 'application/json',
             'User-Agent': f'zentinelle-python/{__version__}',
         }
         if self.api_key:
-            headers['X-Zentinelle-Key'] = self.api_key
+            if for_registration and self.api_key.startswith('bt_'):
+                headers['X-Zentinelle-Bootstrap'] = self.api_key
+            else:
+                headers['X-Zentinelle-Key'] = self.api_key
         if self.org_id:
             headers['X-Zentinelle-Org'] = self.org_id
         return headers
@@ -381,7 +385,7 @@ class ZentinelleClient:
                 "Circuit breaker is OPEN - Zentinelle service appears to be down"
             )
 
-        url = f"{self.endpoint}/api/v1{path}"
+        url = f"{self.endpoint}{self.API_BASE_PATH}{path}"
         last_exception: Optional[Exception] = None
 
         for attempt in range(self._retry_config.max_retries + 1):
@@ -424,7 +428,13 @@ class ZentinelleClient:
             raise last_exception
         raise ZentinelleConnectionError(f"Request to {path} failed unexpectedly")
 
-    def _post(self, path: str, data: Dict, is_evaluate: bool = False) -> Dict:
+    def _post(
+        self,
+        path: str,
+        data: Dict,
+        is_evaluate: bool = False,
+        for_registration: bool = False,
+    ) -> Dict:
         """Make POST request with retry logic."""
         if not self._circuit_breaker.can_execute():
             if self.fail_open:
@@ -436,7 +446,7 @@ class ZentinelleClient:
                 "Circuit breaker is OPEN - Zentinelle service appears to be down"
             )
 
-        url = f"{self.endpoint}/api/v1{path}"
+        url = f"{self.endpoint}{self.API_BASE_PATH}{path}"
         last_exception: Optional[Exception] = None
 
         for attempt in range(self._retry_config.max_retries + 1):
@@ -444,7 +454,7 @@ class ZentinelleClient:
                 response = requests.post(
                     url,
                     json=data,
-                    headers=self._headers(),
+                    headers=self._headers(for_registration=for_registration),
                     timeout=self.timeout
                 )
                 result = self._handle_response(response)
@@ -507,13 +517,13 @@ class ZentinelleClient:
         Returns:
             RegisterResult with agent_id, api_key, config, and policies
         """
-        response = self._post('/agents/register', {
+        response = self._post('/register', {
             'agent_id': self.agent_id,
             'agent_type': self.agent_type,
             'capabilities': capabilities or [],
             'metadata': metadata or {},
             'name': name,
-        })
+        }, for_registration=True)
 
         self.agent_id = response['agent_id']
         self._registered = True
@@ -576,7 +586,7 @@ class ZentinelleClient:
                         updated_at=self._config_cache_time,
                     )
 
-        response = self._get(f'/agents/{self.agent_id}/config')
+        response = self._get(f'/config/{self.agent_id}')
 
         policies = [
             PolicyConfig(**p) for p in response.get('policies', [])
@@ -630,7 +640,7 @@ class ZentinelleClient:
                 if datetime.now(timezone.utc) - self._secrets_cache_time < self._secrets_cache_ttl:
                     return self._secrets_cache.copy()  # Return copy to prevent mutation
 
-        response = self._get(f'/agents/{self.agent_id}/secrets')
+        response = self._get(f'/secrets/{self.agent_id}')
 
         with self._cache_lock:
             self._secrets_cache = response.get('secrets', {})

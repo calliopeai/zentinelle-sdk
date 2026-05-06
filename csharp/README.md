@@ -29,17 +29,21 @@ using Zentinelle.Models;
 // Initialize client
 var client = new ZentinelleClient(new ZentinelleOptions
 {
-    ApiKey = "your-api-key",
-    AgentId = "your-agent-id"
+    ApiKey = "bt_<tenant_id>_<signature>",
+    AgentType = "dotnet-agent"
 });
 
-// Register agent session
+// Register agent
 var registration = await client.RegisterAsync(new RegisterOptions
 {
-    UserId = "user-123",
-    SessionId = "session-456"
+    Name = "My Agent",
+    Capabilities = new List<string> { "chat", "tools" },
+    Metadata = new Dictionary<string, object>
+    {
+        ["environment"] = "production"
+    }
 });
-Console.WriteLine($"Registered: {registration.SessionId}");
+Console.WriteLine($"Registered: {registration.AgentId}");
 
 // Evaluate policy before action
 var result = await client.EvaluateAsync("tool_call", new EvaluateOptions
@@ -57,7 +61,7 @@ if (result.Allowed)
     Console.WriteLine("Action allowed");
 
     // Report usage
-    client.Emit(Event.ToolCall("web_search", success: true));
+    client.EmitToolCall("web_search");
 }
 else
 {
@@ -94,10 +98,6 @@ if (result.Allowed)
 {
     await ExecuteActionAsync();
 }
-else if (result.RequiresApproval)
-{
-    await RequestApprovalAsync(result.ApprovalWorkflowId);
-}
 else
 {
     HandleBlocked(result.Reason);
@@ -112,27 +112,23 @@ Track all agent activities:
 // Track tool call
 client.Emit(new Event
 {
-    Category = EventCategory.ToolCall,
-    Action = "web_search",
-    Success = true,
-    Metadata = new Dictionary<string, object>
+    Type = "tool_call",
+    Category = EventCategory.Audit,
+    Payload = new Dictionary<string, object>
     {
+        ["tool"] = "web_search",
         ["query"] = "weather forecast",
-        ["results_count"] = 10
-    }
+        ["results_count"] = 10,
+        ["success"] = true
+    },
+    UserId = "user-123"
 });
 
 // Track model usage
-client.Emit(Event.ModelRequest("gpt-4", new ModelUsage
-{
-    Model = "gpt-4",
-    InputTokens = 150,
-    OutputTokens = 500,
-    Cost = 0.025m
-}));
+client.EmitModelRequest("openai", "gpt-4", 150, 500, estimatedCost: 0.025m);
 
 // Track errors
-client.Emit(Event.Failed(EventCategory.Error, "api_call", "Connection timeout"));
+client.Emit(Event.Failed(EventCategory.Alert, "api_call", "Connection timeout"));
 ```
 
 ### Configuration & Secrets
@@ -142,24 +138,23 @@ Access runtime configuration:
 ```csharp
 // Get full configuration
 var config = await client.GetConfigAsync();
-Console.WriteLine($"Rate limit: {config.RateLimits?.RequestsPerMinute}");
-Console.WriteLine($"Allowed models: {string.Join(", ", config.AllowedModels ?? new List<string>())}");
+Console.WriteLine($"Heartbeat interval: {config.Config["heartbeat_interval_seconds"]}");
+Console.WriteLine($"Policies: {config.Policies.Count}");
 
 // Get secrets (API keys, etc.)
 var secrets = await client.GetSecretsAsync();
 var openaiKey = secrets["OPENAI_API_KEY"];
 ```
 
-### Session Management
+### Registration
 
-Manage agent sessions:
+Register and cache initial config:
 
 ```csharp
-// Register with full options
 var result = await client.RegisterAsync(new RegisterOptions
 {
-    UserId = "user-123",
-    SessionId = "session-456",
+    Name = "Production Agent",
+    Capabilities = new List<string> { "chat", "tools", "code" },
     Metadata = new Dictionary<string, object>
     {
         ["client_version"] = "2.0.0",
@@ -167,8 +162,8 @@ var result = await client.RegisterAsync(new RegisterOptions
     }
 });
 
-// Access session info
-var sessionId = result.SessionId;
+// Access registration info
+var agentId = result.AgentId;
 var config = result.Config;
 ```
 
@@ -179,24 +174,27 @@ var config = result.Config;
 ```csharp
 var client = new ZentinelleClient(new ZentinelleOptions
 {
-    ApiKey = "your-api-key",
-    AgentId = "your-agent-id",
+    ApiKey = "sk_agent_...",
+    AgentType = "dotnet-agent",
     BaseUrl = "https://custom.zentinelle.ai",      // Custom endpoint
     Timeout = TimeSpan.FromSeconds(30),             // Request timeout
     MaxRetries = 3,                                 // Retry attempts
-    FailOpen = true,                                // Allow on errors
+    FailOpen = false,                               // Allow on errors
     CircuitBreakerThreshold = 5,                    // Failures before open
     CircuitBreakerRecovery = TimeSpan.FromMinutes(1), // Recovery time
-    HeartbeatInterval = TimeSpan.FromSeconds(30),   // Heartbeat frequency
+    HeartbeatInterval = TimeSpan.FromSeconds(60),   // Heartbeat frequency
     FlushInterval = TimeSpan.FromSeconds(5),        // Event flush interval
-    MaxBatchSize = 100                              // Max events per batch
+    MaxBatchSize = 100,                             // Max events per batch
+    ConfigCacheDuration = TimeSpan.FromMinutes(5),
+    SecretsCacheDuration = TimeSpan.FromSeconds(60)
 });
 ```
 
 ### From Environment Variables
 
 ```csharp
-// Uses ZENTINELLE_API_KEY and ZENTINELLE_AGENT_ID
+// Uses ZENTINELLE_API_KEY and ZENTINELLE_AGENT_TYPE
+// ZENTINELLE_AGENT_ID is optional when you bootstrap-register a new agent
 var client = ZentinelleClient.FromEnvironment();
 ```
 
@@ -210,7 +208,8 @@ services.AddSingleton<ZentinelleClient>(sp =>
     return new ZentinelleClient(new ZentinelleOptions
     {
         ApiKey = configuration["Zentinelle:ApiKey"]!,
-        AgentId = configuration["Zentinelle:AgentId"]!
+        AgentType = configuration["Zentinelle:AgentType"]!,
+        AgentId = configuration["Zentinelle:AgentId"]
     }, logger);
 });
 
@@ -313,10 +312,14 @@ public class GovernedKernel
         // Track usage
         _client.Emit(new Event
         {
-            Category = EventCategory.ModelRequest,
-            Action = "invoke_prompt",
-            Success = true,
-            DurationMs = stopwatch.ElapsedMilliseconds
+            Type = "model_request",
+            Category = EventCategory.Telemetry,
+            Payload = new Dictionary<string, object>
+            {
+                ["model"] = "invoke_prompt",
+                ["success"] = true,
+                ["duration_ms"] = stopwatch.ElapsedMilliseconds
+            }
         });
 
         return response.GetValue<string>() ?? string.Empty;
@@ -378,7 +381,8 @@ The `ZentinelleClient` is fully thread-safe. A single instance can be shared:
 private static readonly ZentinelleClient Client = new(new ZentinelleOptions
 {
     ApiKey = Environment.GetEnvironmentVariable("ZENTINELLE_API_KEY")!,
-    AgentId = Environment.GetEnvironmentVariable("ZENTINELLE_AGENT_ID")!
+    AgentType = Environment.GetEnvironmentVariable("ZENTINELLE_AGENT_TYPE")!,
+    AgentId = Environment.GetEnvironmentVariable("ZENTINELLE_AGENT_ID")
 });
 
 // Safe to call from multiple threads

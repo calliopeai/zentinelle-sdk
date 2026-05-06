@@ -1,5 +1,3 @@
-using System.Text.Json.Serialization;
-
 namespace Zentinelle.Models;
 
 /// <summary>
@@ -8,89 +6,87 @@ namespace Zentinelle.Models;
 public class Event
 {
     /// <summary>
-    /// Event category.
+    /// Event type, such as <c>tool_call</c> or <c>model_request</c>.
     /// </summary>
-    [JsonPropertyName("category")]
-    public EventCategory Category { get; set; }
+    public string Type { get; set; } = string.Empty;
 
     /// <summary>
-    /// Action that was performed.
+    /// Event category used for routing and storage.
     /// </summary>
-    [JsonPropertyName("action")]
-    public string Action { get; set; } = string.Empty;
+    public EventCategory Category { get; set; } = EventCategory.Telemetry;
 
     /// <summary>
-    /// Whether the action succeeded.
+    /// Event payload.
     /// </summary>
-    [JsonPropertyName("success")]
-    public bool Success { get; set; }
-
-    /// <summary>
-    /// Agent ID (set automatically if not provided).
-    /// </summary>
-    [JsonPropertyName("agent_id")]
-    public string? AgentId { get; set; }
+    public Dictionary<string, object> Payload { get; set; } = new();
 
     /// <summary>
     /// User ID associated with this event.
     /// </summary>
-    [JsonPropertyName("user_id")]
     public string? UserId { get; set; }
-
-    /// <summary>
-    /// Session ID associated with this event.
-    /// </summary>
-    [JsonPropertyName("session_id")]
-    public string? SessionId { get; set; }
 
     /// <summary>
     /// Event timestamp (set automatically if not provided).
     /// </summary>
-    [JsonPropertyName("timestamp")]
     public DateTime? Timestamp { get; set; }
 
     /// <summary>
-    /// Duration of the action in milliseconds.
+    /// Converts the event to the canonical API payload.
     /// </summary>
-    [JsonPropertyName("duration_ms")]
-    public long? DurationMs { get; set; }
-
-    /// <summary>
-    /// Model usage information.
-    /// </summary>
-    [JsonPropertyName("model_usage")]
-    public ModelUsage? ModelUsage { get; set; }
-
-    /// <summary>
-    /// Additional metadata.
-    /// </summary>
-    [JsonPropertyName("metadata")]
-    public Dictionary<string, object>? Metadata { get; set; }
+    public Dictionary<string, object> ToApiPayload()
+    {
+        return new Dictionary<string, object>
+        {
+            ["type"] = Type,
+            ["category"] = Category switch
+            {
+                EventCategory.Telemetry => "telemetry",
+                EventCategory.Audit => "audit",
+                EventCategory.Alert => "alert",
+                EventCategory.Compliance => "compliance",
+                _ => "telemetry"
+            },
+            ["payload"] = Payload,
+            ["timestamp"] = (Timestamp ?? DateTime.UtcNow).ToUniversalTime(),
+            ["user_id"] = UserId ?? string.Empty
+        };
+    }
 
     /// <summary>
     /// Creates a success event.
     /// </summary>
-    public static Event Succeeded(EventCategory category, string action)
+    public static Event Succeeded(EventCategory category, string eventType)
     {
         return new Event
         {
             Category = category,
-            Action = action,
-            Success = true
+            Type = eventType,
+            Payload = new Dictionary<string, object>
+            {
+                ["success"] = true
+            }
         };
     }
 
     /// <summary>
     /// Creates a failure event.
     /// </summary>
-    public static Event Failed(EventCategory category, string action, string? error = null)
+    public static Event Failed(EventCategory category, string eventType, string? error = null)
     {
+        var payload = new Dictionary<string, object>
+        {
+            ["success"] = false
+        };
+        if (!string.IsNullOrWhiteSpace(error))
+        {
+            payload["error"] = error;
+        }
+
         return new Event
         {
             Category = category,
-            Action = action,
-            Success = false,
-            Metadata = error != null ? new Dictionary<string, object> { ["error"] = error } : null
+            Type = eventType,
+            Payload = payload
         };
     }
 
@@ -99,12 +95,21 @@ public class Event
     /// </summary>
     public static Event ToolCall(string toolName, bool success, Dictionary<string, object>? metadata = null)
     {
+        var payload = new Dictionary<string, object>
+        {
+            ["tool"] = toolName,
+            ["success"] = success
+        };
+        if (metadata != null)
+        {
+            payload["metadata"] = metadata;
+        }
+
         return new Event
         {
-            Category = EventCategory.ToolCall,
-            Action = toolName,
-            Success = success,
-            Metadata = metadata
+            Category = EventCategory.Audit,
+            Type = "tool_call",
+            Payload = payload
         };
     }
 
@@ -115,10 +120,17 @@ public class Event
     {
         return new Event
         {
-            Category = EventCategory.ModelRequest,
-            Action = model,
-            Success = success,
-            ModelUsage = usage
+            Category = EventCategory.Telemetry,
+            Type = "model_request",
+            Payload = new Dictionary<string, object>
+            {
+                ["provider"] = usage.Provider ?? string.Empty,
+                ["model"] = model,
+                ["input_tokens"] = usage.InputTokens,
+                ["output_tokens"] = usage.OutputTokens,
+                ["estimated_cost"] = usage.EstimatedCost ?? 0m,
+                ["success"] = success
+            }
         };
     }
 }
@@ -126,32 +138,12 @@ public class Event
 /// <summary>
 /// Event category types.
 /// </summary>
-[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum EventCategory
 {
-    /// <summary>Model/LLM request.</summary>
-    [JsonPropertyName("model_request")]
-    ModelRequest,
-
-    /// <summary>Tool/function call.</summary>
-    [JsonPropertyName("tool_call")]
-    ToolCall,
-
-    /// <summary>Policy evaluation.</summary>
-    [JsonPropertyName("policy_evaluation")]
-    PolicyEvaluation,
-
-    /// <summary>User interaction.</summary>
-    [JsonPropertyName("user_interaction")]
-    UserInteraction,
-
-    /// <summary>Error occurred.</summary>
-    [JsonPropertyName("error")]
-    Error,
-
-    /// <summary>Custom event.</summary>
-    [JsonPropertyName("custom")]
-    Custom
+    Telemetry,
+    Audit,
+    Alert,
+    Compliance
 }
 
 /// <summary>
@@ -160,32 +152,41 @@ public enum EventCategory
 public class ModelUsage
 {
     /// <summary>
+    /// Provider identifier.
+    /// </summary>
+    public string? Provider { get; set; }
+
+    /// <summary>
     /// Model identifier.
     /// </summary>
-    [JsonPropertyName("model")]
     public string? Model { get; set; }
 
     /// <summary>
     /// Number of input tokens.
     /// </summary>
-    [JsonPropertyName("input_tokens")]
     public int InputTokens { get; set; }
 
     /// <summary>
     /// Number of output tokens.
     /// </summary>
-    [JsonPropertyName("output_tokens")]
     public int OutputTokens { get; set; }
 
     /// <summary>
     /// Total tokens used.
     /// </summary>
-    [JsonPropertyName("total_tokens")]
     public int TotalTokens => InputTokens + OutputTokens;
 
     /// <summary>
     /// Estimated cost in dollars.
     /// </summary>
-    [JsonPropertyName("cost")]
-    public decimal? Cost { get; set; }
+    public decimal? EstimatedCost { get; set; }
+
+    /// <summary>
+    /// Backwards-compatible alias for <see cref="EstimatedCost"/>.
+    /// </summary>
+    public decimal? Cost
+    {
+        get => EstimatedCost;
+        set => EstimatedCost = value;
+    }
 }

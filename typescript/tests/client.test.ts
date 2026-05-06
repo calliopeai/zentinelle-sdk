@@ -137,6 +137,7 @@ describe('ZentinelleClient', () => {
     if (client) {
       client.shutdown();
     }
+    vi.unstubAllGlobals();
   });
 
   describe('constructor', () => {
@@ -223,6 +224,16 @@ describe('ZentinelleClient', () => {
         autoHeartbeat: false,
       });
       // Can't directly access private field, but we can test behavior
+      expect(client).toBeDefined();
+    });
+
+    it('should allow bootstrap tokens', () => {
+      client = new ZentinelleClient({
+        apiKey: 'bt_test_bootstrap_123',
+        agentType: 'test',
+        autoFlush: false,
+        autoHeartbeat: false,
+      });
       expect(client).toBeDefined();
     });
   });
@@ -395,6 +406,83 @@ describe('ZentinelleClient', () => {
       await client.shutdown();
       // Should not throw
       expect(client).toBeDefined();
+    });
+  });
+
+  describe('service contract', () => {
+    it('should register via bootstrap header and switch to runtime API key', async () => {
+      const fetchMock = vi.fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({
+          agent_id: 'sdk-agent-001',
+          api_key: 'sk_agent_runtime_123',
+          config: {},
+          policies: [],
+        }), { status: 201 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({
+          agent_id: 'sdk-agent-001',
+          config: {},
+          policies: [],
+          updated_at: '2026-04-10T00:00:00Z',
+        }), { status: 200 }));
+      vi.stubGlobal('fetch', fetchMock);
+
+      client = new ZentinelleClient({
+        apiKey: 'bt_test_bootstrap_123',
+        agentType: 'test',
+        autoFlush: false,
+        autoHeartbeat: false,
+      });
+
+      await client.register({ name: 'Contract Agent' });
+      await client.getConfig(true);
+
+      expect(fetchMock).toHaveBeenNthCalledWith(
+        1,
+        'https://api.zentinelle.ai/api/zentinelle/v1/register',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            'X-Zentinelle-Bootstrap': 'bt_test_bootstrap_123',
+          }),
+        }),
+      );
+      expect(fetchMock).toHaveBeenNthCalledWith(
+        2,
+        'https://api.zentinelle.ai/api/zentinelle/v1/config/sdk-agent-001',
+        expect.objectContaining({
+          method: 'GET',
+          headers: expect.objectContaining({
+            'X-Zentinelle-Key': 'sk_agent_runtime_123',
+          }),
+        }),
+      );
+    });
+
+    it('should request secrets from the canonical service path', async () => {
+      const fetchMock = vi.fn().mockResolvedValue(
+        new Response(JSON.stringify({ secrets: {} }), { status: 200 }),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+
+      client = new ZentinelleClient({
+        apiKey: 'sk_agent_runtime_123',
+        agentType: 'test',
+        agentId: 'sdk-agent-001',
+        autoFlush: false,
+        autoHeartbeat: false,
+      });
+
+      await client.getSecrets(true);
+
+      expect(fetchMock).toHaveBeenCalledWith(
+        'https://api.zentinelle.ai/api/zentinelle/v1/secrets/sdk-agent-001',
+        expect.objectContaining({
+          method: 'GET',
+          headers: expect.objectContaining({
+            'X-Zentinelle-Key': 'sk_agent_runtime_123',
+          }),
+        }),
+      );
     });
   });
 });

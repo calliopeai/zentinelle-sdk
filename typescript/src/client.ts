@@ -45,7 +45,7 @@ export interface ZentinelleClientOptions {
 
 export class ZentinelleClient {
   private readonly endpoint: string;
-  private readonly apiKey: string;
+  private apiKey: string;
   private readonly agentType: string;
   private agentId: string | null;
   private readonly orgId?: string;
@@ -74,16 +74,18 @@ export class ZentinelleClient {
 
   private registered = false;
 
+  private static readonly API_BASE_PATH = '/api/zentinelle/v1';
+
   constructor(options: ZentinelleClientOptions) {
     // Validate required parameters
     if (!options.apiKey || options.apiKey.length < 10) {
       throw new Error('apiKey is required and must be valid');
     }
     // Validate API key format (should start with known prefixes)
-    const validPrefixes = ['sk_agent_', 'sk_test_', 'sk_live_', 'znt_'];
+    const validPrefixes = ['sk_agent_', 'sk_test_', 'sk_live_', 'znt_', 'bt_'];
     if (!validPrefixes.some(prefix => options.apiKey.startsWith(prefix))) {
       console.warn(
-        '[Zentinelle] API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*). ' +
+        '[Zentinelle] API key does not match expected format (sk_agent_*, sk_test_*, sk_live_*, znt_*, bt_*). ' +
         'This may indicate an invalid key.'
       );
     }
@@ -157,13 +159,17 @@ export class ZentinelleClient {
   // HTTP Helpers
   // ===========================================================================
 
-  private getHeaders(): Record<string, string> {
+  private getHeaders(options?: { forRegistration?: boolean }): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'User-Agent': `zentinelle-js/${VERSION}`,
     };
     if (this.apiKey) {
-      headers['X-Zentinelle-Key'] = this.apiKey;
+      if (options?.forRegistration && this.apiKey.startsWith('bt_')) {
+        headers['X-Zentinelle-Bootstrap'] = this.apiKey;
+      } else {
+        headers['X-Zentinelle-Key'] = this.apiKey;
+      }
     }
     if (this.orgId) {
       headers['X-Zentinelle-Org'] = this.orgId;
@@ -197,7 +203,7 @@ export class ZentinelleClient {
     method: 'GET' | 'POST',
     path: string,
     body?: unknown,
-    options?: { isEvaluateRequest?: boolean }
+    options?: { isEvaluateRequest?: boolean; forRegistration?: boolean }
   ): Promise<T> {
     if (!this.circuitBreaker.canExecute()) {
       if (this.failOpen) {
@@ -207,7 +213,7 @@ export class ZentinelleClient {
       throw new ZentinelleConnectionError('Circuit breaker is OPEN');
     }
 
-    const url = `${this.endpoint}/api/v1${path}`;
+    const url = `${this.endpoint}${ZentinelleClient.API_BASE_PATH}${path}`;
     let lastError: Error | null = null;
 
     for (let attempt = 0; attempt <= this.retryConfig.maxRetries; attempt++) {
@@ -217,7 +223,7 @@ export class ZentinelleClient {
       try {
         const response = await fetch(url, {
           method,
-          headers: this.getHeaders(),
+          headers: this.getHeaders({ forRegistration: options?.forRegistration }),
           body: body ? JSON.stringify(body) : undefined,
           signal: controller.signal,
         });
@@ -300,15 +306,18 @@ export class ZentinelleClient {
         config: Record<string, unknown>;
         priority?: number;
       }>;
-    }>('POST', '/agents/register', {
+    }>('POST', '/register', {
       agent_id: this.agentId,
       agent_type: this.agentType,
       capabilities: options.capabilities ?? [],
       metadata: options.metadata ?? {},
       name: options.name,
-    });
+    }, { forRegistration: true });
 
     this.agentId = response.agent_id;
+    if (response.api_key) {
+      this.apiKey = response.api_key;
+    }
     this.registered = true;
     this.configCache = response.config;
     this.configCacheTime = new Date();
@@ -376,7 +385,7 @@ export class ZentinelleClient {
         config: Record<string, unknown>;
       }>;
       updated_at: string;
-    }>('GET', `/agents/${this.agentId}/config`);
+    }>('GET', `/config/${this.agentId}`);
 
     this.configCache = response.config;
     this.configCacheTime = new Date();
@@ -411,7 +420,7 @@ export class ZentinelleClient {
 
     const response = await this.request<{
       secrets: Record<string, string>;
-    }>('GET', `/agents/${this.agentId}/secrets`);
+    }>('GET', `/secrets/${this.agentId}`);
 
     this.secretsCache = response.secrets;
     this.secretsCacheTime = new Date();
