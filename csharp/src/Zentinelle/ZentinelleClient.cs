@@ -202,7 +202,7 @@ public sealed class ZentinelleClient : IDisposable, IAsyncDisposable
         {
             agent_id = _agentId,
             agent_type = _options.AgentType,
-            capabilities = options?.Capabilities ?? Array.Empty<string>(),
+            capabilities = options?.Capabilities ?? new List<string>(),
             metadata = options?.Metadata ?? new Dictionary<string, object>(),
             name = options?.Name
         };

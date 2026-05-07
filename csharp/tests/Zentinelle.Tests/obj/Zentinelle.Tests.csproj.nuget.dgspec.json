@@ -1,0 +1,157 @@
+{
+  "format": 1,
+  "restore": {
+    "/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/tests/Zentinelle.Tests/Zentinelle.Tests.csproj": {}
+  },
+  "projects": {
+    "/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/src/Zentinelle/Zentinelle.csproj": {
+      "version": "0.1.0",
+      "restore": {
+        "projectUniqueName": "/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/src/Zentinelle/Zentinelle.csproj",
+        "projectName": "Zentinelle",
+        "projectPath": "/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/src/Zentinelle/Zentinelle.csproj",
+        "packagesPath": "/Users/ragelink/.nuget/packages/",
+        "outputPath": "/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/src/Zentinelle/obj/",
+        "projectStyle": "PackageReference",
+        "crossTargeting": true,
+        "configFilePaths": [
+          "/Users/ragelink/.nuget/NuGet/NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0": {
+            "targetAlias": "net8.0",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        }
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "dependencies": {
+            "Microsoft.Extensions.Logging.Abstractions": {
+              "target": "Package",
+              "version": "[8.0.0, )"
+            },
+            "System.Text.Json": {
+              "target": "Package",
+              "version": "[8.0.0, )"
+            }
+          },
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "/Users/ragelink/.dotnet/sdk/8.0.420/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    },
+    "/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/tests/Zentinelle.Tests/Zentinelle.Tests.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/tests/Zentinelle.Tests/Zentinelle.Tests.csproj",
+        "projectName": "Zentinelle.Tests",
+        "projectPath": "/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/tests/Zentinelle.Tests/Zentinelle.Tests.csproj",
+        "packagesPath": "/Users/ragelink/.nuget/packages/",
+        "outputPath": "/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/tests/Zentinelle.Tests/obj/",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "/Users/ragelink/.nuget/NuGet/NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0"
+        ],
+        "sources": {
+          "https://api.nuget.org/v3/index.json": {}
+        },
+        "frameworks": {
+          "net8.0": {
+            "targetAlias": "net8.0",
+            "projectReferences": {
+              "/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/src/Zentinelle/Zentinelle.csproj": {
+                "projectPath": "/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/src/Zentinelle/Zentinelle.csproj"
+              }
+            }
+          }
+        },
+        "warningProperties": {
+          "warnAsError": [
+            "NU1605"
+          ]
+        },
+        "restoreAuditProperties": {
+          "enableAudit": "true",
+          "auditLevel": "low",
+          "auditMode": "direct"
+        }
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "dependencies": {
+            "Microsoft.NET.Test.Sdk": {
+              "target": "Package",
+              "version": "[17.8.0, )"
+            },
+            "coverlet.collector": {
+              "target": "Package",
+              "version": "[6.0.0, )"
+            },
+            "xunit": {
+              "target": "Package",
+              "version": "[2.5.3, )"
+            },
+            "xunit.runner.visualstudio": {
+              "target": "Package",
+              "version": "[2.5.3, )"
+            }
+          },
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "/Users/ragelink/.dotnet/sdk/8.0.420/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}
