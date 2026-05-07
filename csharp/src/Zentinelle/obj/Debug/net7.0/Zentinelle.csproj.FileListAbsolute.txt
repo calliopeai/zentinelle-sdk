@@ -1,0 +1,6 @@
+/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/src/Zentinelle/obj/Debug/net7.0/Zentinelle.csproj.AssemblyReference.cache
+/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/src/Zentinelle/obj/Debug/net7.0/Zentinelle.GeneratedMSBuildEditorConfig.editorconfig
+/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/src/Zentinelle/obj/Debug/net7.0/Zentinelle.AssemblyInfoInputs.cache
+/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/src/Zentinelle/obj/Debug/net7.0/Zentinelle.AssemblyInfo.cs
+/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/src/Zentinelle/obj/Debug/net7.0/Zentinelle.csproj.CoreCompileInputs.cache
+/Users/ragelink/repos/calliope/zentinelle-sdk.git/csharp/src/Zentinelle/obj/Debug/net7.0/Zentinelle.sourcelink.json

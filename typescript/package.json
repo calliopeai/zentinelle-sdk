@@ -1,6 +1,6 @@
 {
   "name": "zentinelle",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Zentinelle SDK - AI Agent Governance & Runtime Control",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

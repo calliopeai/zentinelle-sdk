@@ -1,0 +1,664 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>Zentinelle</name>
+    </assembly>
+    <members>
+        <member name="T:Zentinelle.Exceptions.ZentinelleException">
+            <summary>
+            Base exception for all Zentinelle errors.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Exceptions.ZentinelleException.#ctor(System.String)">
+            <summary>
+            Creates a new Zentinelle exception.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Exceptions.ZentinelleException.#ctor(System.String,System.Exception)">
+            <summary>
+            Creates a new Zentinelle exception with an inner exception.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Exceptions.AuthenticationException">
+            <summary>
+            Exception thrown when authentication fails.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Exceptions.AuthenticationException.#ctor(System.String)">
+            <summary>
+            Creates a new authentication exception.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Exceptions.ConnectionException">
+            <summary>
+            Exception thrown when a connection error occurs.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Exceptions.ConnectionException.#ctor(System.String)">
+            <summary>
+            Creates a new connection exception.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Exceptions.ConnectionException.#ctor(System.String,System.Exception)">
+            <summary>
+            Creates a new connection exception with an inner exception.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Exceptions.RateLimitException">
+            <summary>
+            Exception thrown when rate limit is exceeded.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Exceptions.RateLimitException.RetryAfterSeconds">
+            <summary>
+            Seconds to wait before retrying.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Exceptions.RateLimitException.#ctor(System.String,System.Int32)">
+            <summary>
+            Creates a new rate limit exception.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Exceptions.CircuitBreakerOpenException">
+            <summary>
+            Exception thrown when circuit breaker is open.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Exceptions.CircuitBreakerOpenException.#ctor(System.String)">
+            <summary>
+            Creates a new circuit breaker exception.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Exceptions.PolicyViolationException">
+            <summary>
+            Exception thrown when a policy blocks an action.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Exceptions.PolicyViolationException.Result">
+            <summary>
+            The evaluation result that caused this exception.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Exceptions.PolicyViolationException.#ctor(System.String,Zentinelle.Models.EvaluateResult)">
+            <summary>
+            Creates a new policy violation exception.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Models.ConfigResult">
+            <summary>
+            Result of a config fetch.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.ConfigResult.AgentId">
+            <summary>
+            Agent identifier.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.ConfigResult.Config">
+            <summary>
+            Runtime config payload.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.ConfigResult.Policies">
+            <summary>
+            Effective policies for the agent.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.ConfigResult.UpdatedAt">
+            <summary>
+            Timestamp for the last config update.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Models.EvaluateOptions">
+            <summary>
+            Options for policy evaluation requests.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.EvaluateOptions.UserId">
+            <summary>
+            User ID for the evaluation.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.EvaluateOptions.SessionId">
+            <summary>
+            Session ID for the evaluation.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.EvaluateOptions.Context">
+            <summary>
+            Additional context for policy evaluation.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Models.EvaluateResult">
+            <summary>
+            Result of a policy evaluation.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.EvaluateResult.Allowed">
+            <summary>
+            Whether the action is allowed.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.EvaluateResult.Reason">
+            <summary>
+            Reason for the decision.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.EvaluateResult.FailOpen">
+            <summary>
+            Whether the decision was made due to fail-open mode.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.EvaluateResult.PoliciesEvaluated">
+            <summary>
+            Individual policy evaluations.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.EvaluateResult.Warnings">
+            <summary>
+            Warnings returned by the service.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.EvaluateResult.Context">
+            <summary>
+            Additional evaluation context.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.EvaluateResult.IsBlocked">
+            <summary>
+            Checks if any policy blocked the action.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.EvaluateResult.RequiresHumanApproval">
+            <summary>
+            Whether human approval is required.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Models.EvaluateResult.GetBlockingPolicies">
+            <summary>
+            Gets the policies that blocked the action.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Models.PolicyEvaluation">
+            <summary>
+            Result of an individual policy evaluation.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.PolicyEvaluation.Name">
+            <summary>
+            Name of the policy.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.PolicyEvaluation.Type">
+            <summary>
+            Type of the policy.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.PolicyEvaluation.Passed">
+            <summary>
+            Whether the policy passed.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.PolicyEvaluation.Message">
+            <summary>
+            Human-readable message for the policy result.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Models.Event">
+            <summary>
+            An event to track in Zentinelle.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.Event.Type">
+            <summary>
+            Event type, such as <c>tool_call</c> or <c>model_request</c>.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.Event.Category">
+            <summary>
+            Event category used for routing and storage.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.Event.Payload">
+            <summary>
+            Event payload.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.Event.UserId">
+            <summary>
+            User ID associated with this event.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.Event.Timestamp">
+            <summary>
+            Event timestamp (set automatically if not provided).
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Models.Event.ToApiPayload">
+            <summary>
+            Converts the event to the canonical API payload.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Models.Event.Succeeded(Zentinelle.Models.EventCategory,System.String)">
+            <summary>
+            Creates a success event.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Models.Event.Failed(Zentinelle.Models.EventCategory,System.String,System.String)">
+            <summary>
+            Creates a failure event.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Models.Event.ToolCall(System.String,System.Boolean,System.Collections.Generic.Dictionary{System.String,System.Object})">
+            <summary>
+            Creates a tool call event.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Models.Event.ModelRequest(System.String,Zentinelle.Models.ModelUsage,System.Boolean)">
+            <summary>
+            Creates a model request event.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Models.EventCategory">
+            <summary>
+            Event category types.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Models.ModelUsage">
+            <summary>
+            Model usage information.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.ModelUsage.Provider">
+            <summary>
+            Provider identifier.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.ModelUsage.Model">
+            <summary>
+            Model identifier.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.ModelUsage.InputTokens">
+            <summary>
+            Number of input tokens.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.ModelUsage.OutputTokens">
+            <summary>
+            Number of output tokens.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.ModelUsage.TotalTokens">
+            <summary>
+            Total tokens used.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.ModelUsage.EstimatedCost">
+            <summary>
+            Estimated cost in dollars.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.ModelUsage.Cost">
+            <summary>
+            Backwards-compatible alias for <see cref="P:Zentinelle.Models.ModelUsage.EstimatedCost"/>.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Models.HeartbeatResult">
+            <summary>
+            Result of a heartbeat request.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.HeartbeatResult.Acknowledged">
+            <summary>
+            Whether the heartbeat was accepted.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.HeartbeatResult.ConfigChanged">
+            <summary>
+            Explicit config-change signal from the service.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.HeartbeatResult.DriftDetected">
+            <summary>
+            Legacy drift signal used by some deployments.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.HeartbeatResult.SyncRequired">
+            <summary>
+            Legacy sync-required signal used by some deployments.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.HeartbeatResult.NextHeartbeatSeconds">
+            <summary>
+            Suggested next heartbeat interval.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.HeartbeatResult.HasConfigChangeSignal">
+            <summary>
+            Returns true when any config-refresh signal is present.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Models.PolicyConfig">
+            <summary>
+            Effective policy configuration for an agent.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.PolicyConfig.Id">
+            <summary>
+            Policy identifier.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.PolicyConfig.Name">
+            <summary>
+            Policy name.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.PolicyConfig.Type">
+            <summary>
+            Policy type.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.PolicyConfig.Enforcement">
+            <summary>
+            Enforcement mode for the policy.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.PolicyConfig.Config">
+            <summary>
+            Policy-specific configuration payload.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.PolicyConfig.Priority">
+            <summary>
+            Policy priority where lower numbers are evaluated first.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.PolicyConfig.IsEnforced">
+            <summary>
+            Returns true when the policy is actively enforced.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Models.RegisterResult">
+            <summary>
+            Result of agent registration.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.RegisterResult.AgentId">
+            <summary>
+            The registered agent ID.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.RegisterResult.ApiKey">
+            <summary>
+            The runtime API key returned after bootstrap registration.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.RegisterResult.Config">
+            <summary>
+            Runtime configuration for the agent.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.RegisterResult.Policies">
+            <summary>
+            Effective policies returned during registration.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Models.RegisterOptions">
+            <summary>
+            Options for agent registration.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.RegisterOptions.Capabilities">
+            <summary>
+            Declared agent capabilities.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.RegisterOptions.Metadata">
+            <summary>
+            Additional metadata for the agent.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Models.RegisterOptions.Name">
+            <summary>
+            Optional display name for the agent.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Resilience.CircuitBreaker">
+            <summary>
+            Circuit breaker for failing fast when the service is unavailable.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.Resilience.CircuitBreaker.State">
+            <summary>
+            Current state of the circuit breaker.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Resilience.CircuitBreaker.#ctor(System.Int32,System.TimeSpan,System.Int32)">
+            <summary>
+            Creates a new circuit breaker.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Resilience.CircuitBreaker.CanExecute">
+            <summary>
+            Checks if an operation can be executed.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Resilience.CircuitBreaker.RecordSuccess">
+            <summary>
+            Records a successful operation.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Resilience.CircuitBreaker.RecordFailure">
+            <summary>
+            Records a failed operation.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.Resilience.CircuitBreaker.Reset">
+            <summary>
+            Resets the circuit breaker to closed state.
+            </summary>
+        </member>
+        <member name="T:Zentinelle.Resilience.CircuitState">
+            <summary>
+            Circuit breaker states.
+            </summary>
+        </member>
+        <member name="F:Zentinelle.Resilience.CircuitState.Closed">
+            <summary>Circuit is closed, operations allowed.</summary>
+        </member>
+        <member name="F:Zentinelle.Resilience.CircuitState.Open">
+            <summary>Circuit is open, operations blocked.</summary>
+        </member>
+        <member name="F:Zentinelle.Resilience.CircuitState.HalfOpen">
+            <summary>Circuit is testing if service recovered.</summary>
+        </member>
+        <member name="T:Zentinelle.ZentinelleClient">
+            <summary>
+            Client for interacting with the Zentinelle AI governance platform.
+            Thread-safe and designed for reuse across your application.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.#ctor(Zentinelle.ZentinelleOptions,Microsoft.Extensions.Logging.ILogger{Zentinelle.ZentinelleClient},System.Net.Http.HttpClient)">
+            <summary>
+            Creates a new Zentinelle client with the specified options.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.FromEnvironment(Microsoft.Extensions.Logging.ILogger{Zentinelle.ZentinelleClient})">
+            <summary>
+            Creates a new Zentinelle client using environment variables.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.RegisterAsync(Zentinelle.Models.RegisterOptions,System.Threading.CancellationToken)">
+            <summary>
+            Registers the agent with Zentinelle.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.EvaluateAsync(System.String,Zentinelle.Models.EvaluateOptions,System.Threading.CancellationToken)">
+            <summary>
+            Evaluates an action against configured policies.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.Evaluate(System.String,Zentinelle.Models.EvaluateOptions)">
+            <summary>
+            Evaluates an action synchronously.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.CanCallToolAsync(System.String,System.String,System.Threading.CancellationToken)">
+            <summary>
+            Checks if a tool call is allowed.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.CanUseModelAsync(System.String,System.String,System.Threading.CancellationToken)">
+            <summary>
+            Checks if a model request is allowed.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.Emit(Zentinelle.Models.Event)">
+            <summary>
+            Emits an event for tracking.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.EmitAsync(Zentinelle.Models.Event,System.Threading.CancellationToken)">
+            <summary>
+            Emits an event asynchronously and waits for confirmation.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.EmitToolCall(System.String,System.String,System.Nullable{System.Int64})">
+            <summary>
+            Convenience wrapper for tool-call events.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.EmitModelRequest(System.String,System.String,System.Int32,System.Int32,System.String,System.Nullable{System.Int64},System.Nullable{System.Decimal})">
+            <summary>
+            Convenience wrapper for model-request events.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.TrackUsage(Zentinelle.Models.ModelUsage)">
+            <summary>
+            Tracks model usage for cost policy evaluation.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.GetConfigAsync(System.Boolean,System.Threading.CancellationToken)">
+            <summary>
+            Gets the agent configuration from Zentinelle.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.GetSecretsAsync(System.Boolean,System.Threading.CancellationToken)">
+            <summary>
+            Gets secrets configured for this agent.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.GetSecretAsync(System.String,System.String,System.Threading.CancellationToken)">
+            <summary>
+            Gets a single secret value.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.FlushAsync(System.Threading.CancellationToken)">
+            <summary>
+            Flushes any buffered events immediately.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.HeartbeatAsync(System.String,System.Collections.Generic.Dictionary{System.String,System.Object},System.Threading.CancellationToken)">
+            <summary>
+            Sends a heartbeat to Zentinelle.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleClient.IsRegistered">
+            <summary>
+            Whether the client currently has a registered runtime identity.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.ToString">
+            <summary>
+            Returns a string representation of the client with masked API key.
+            </summary>
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.Dispose">
+            <inheritdoc />
+        </member>
+        <member name="M:Zentinelle.ZentinelleClient.DisposeAsync">
+            <inheritdoc />
+        </member>
+        <member name="T:Zentinelle.ZentinelleOptions">
+            <summary>
+            Configuration options for the Zentinelle client.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.ApiKey">
+            <summary>
+            Your Zentinelle API key. Required.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.AgentId">
+            <summary>
+            Optional agent ID to use for requests before registration.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.AgentType">
+            <summary>
+            The type of agent (e.g., "langchain", "crewai", "custom"). Required.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.BaseUrl">
+            <summary>
+            Base URL for the Zentinelle API.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.OrgId">
+            <summary>
+            Optional organization header for multi-tenant routing.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.Timeout">
+            <summary>
+            HTTP request timeout.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.MaxRetries">
+            <summary>
+            Maximum number of retry attempts for failed requests.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.FailOpen">
+            <summary>
+            Whether to allow actions when Zentinelle is unreachable.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.CircuitBreakerThreshold">
+            <summary>
+            Number of failures before the circuit breaker opens.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.CircuitBreakerRecovery">
+            <summary>
+            Time to wait before attempting recovery after circuit breaker opens.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.HeartbeatInterval">
+            <summary>
+            Interval between heartbeat requests.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.FlushInterval">
+            <summary>
+            Interval between event buffer flushes.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.MaxBatchSize">
+            <summary>
+            Maximum number of events to batch in a single flush.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.ConfigCacheDuration">
+            <summary>
+            How long to cache configuration responses.
+            </summary>
+        </member>
+        <member name="P:Zentinelle.ZentinelleOptions.SecretsCacheDuration">
+            <summary>
+            How long to cache secrets responses.
+            </summary>
+        </member>
+    </members>
+</doc>

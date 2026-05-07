@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zentinelle"
-version = "0.1.0"
+version = "1.0.0"
 description = "Zentinelle SDK - AI Agent Governance & Runtime Control"
 readme = "README.md"
 license = "MIT"

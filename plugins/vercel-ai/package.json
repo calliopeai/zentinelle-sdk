@@ -1,6 +1,6 @@
 {
   "name": "zentinelle-ai",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Zentinelle integration for Vercel AI SDK - AI Agent Governance",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

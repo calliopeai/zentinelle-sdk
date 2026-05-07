@@ -240,7 +240,7 @@ func (c *Client) request(
 		}
 
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", "zentinelle-go/0.1.0")
+		req.Header.Set("User-Agent", "zentinelle-go/1.0.0")
 
 		c.stateMu.RLock()
 		apiKey := c.config.APIKey
