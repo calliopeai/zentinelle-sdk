@@ -759,7 +759,9 @@ class ZentinelleClient:
             'type': event_type,
             'category': category,
             'payload': payload or {},
-            'timestamp': datetime.now(timezone.utc).isoformat() + 'Z',
+            # ISO 8601 UTC — datetime.now(timezone.utc).isoformat() already
+            # includes "+00:00", so don't append "Z".
+            'timestamp': datetime.now(timezone.utc).isoformat(),
             'user_id': user_id or '',
         }
 
