@@ -904,6 +904,84 @@ class ZentinelleClient:
                     self.get_config(force_refresh=True)
 
     # =========================================================================
+    # Direct interaction logging
+    # =========================================================================
+
+    def log_interaction(
+        self,
+        prompt: str = '',
+        response: str = '',
+        model: str = '',
+        provider: str = '',
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        cost_usd: float = 0.0,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """
+        Log an AI interaction directly (separate from the evaluate flow).
+
+        Use this when you need to record an LLM interaction that bypassed
+        the proxy/evaluate flow — e.g., when calling a provider SDK directly
+        but still wanting Zentinelle to track it for compliance.
+
+        Args:
+            prompt: The user prompt sent to the LLM
+            response: The LLM response
+            model: Model identifier (e.g., 'gpt-4o', 'claude-sonnet-4')
+            provider: Provider name (e.g., 'openai', 'anthropic')
+            input_tokens: Prompt token count
+            output_tokens: Response token count
+            cost_usd: Estimated cost in USD
+            metadata: Additional context (user_id, session_id, etc.)
+
+        Returns:
+            True if logged successfully, False otherwise
+        """
+        try:
+            self._post('/interaction', {
+                'agent_id': self.agent_id,
+                'prompt': prompt,
+                'response': response,
+                'model': model,
+                'provider': provider,
+                'input_tokens': input_tokens,
+                'output_tokens': output_tokens,
+                'cost_usd': cost_usd,
+                'metadata': metadata or {},
+            })
+            return True
+        except (ZentinelleConnectionError, ZentinelleRateLimitError, requests.RequestException) as e:
+            logger.warning(f"Failed to log interaction: {e}")
+            return False
+
+    # =========================================================================
+    # Deregistration
+    # =========================================================================
+
+    def deregister(self) -> bool:
+        """
+        Deregister this agent from Zentinelle.
+
+        Cleanly removes the agent registration on shutdown. This is different
+        from shutdown() which just stops local threads — deregister() tells
+        the server the agent is going away permanently.
+
+        Returns:
+            True if deregistered successfully, False otherwise
+        """
+        if not self._registered:
+            return True
+        try:
+            self._post('/deregister', {'agent_id': self.agent_id})
+            self._registered = False
+            logger.info(f"Deregistered agent {self.agent_id}")
+            return True
+        except (ZentinelleConnectionError, ZentinelleAuthError, requests.RequestException) as e:
+            logger.warning(f"Failed to deregister: {e}")
+            return False
+
+    # =========================================================================
     # Lifecycle
     # =========================================================================
 

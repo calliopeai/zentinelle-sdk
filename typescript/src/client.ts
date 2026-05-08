@@ -658,6 +658,68 @@ export class ZentinelleClient {
   }
 
   // ===========================================================================
+  // Direct interaction logging
+  // ===========================================================================
+
+  /**
+   * Log an AI interaction directly (separate from the evaluate flow).
+   *
+   * Use this when you need to record an LLM interaction that bypassed the
+   * proxy/evaluate flow — e.g., when calling a provider SDK directly but
+   * still wanting Zentinelle to track it for compliance.
+   */
+  async logInteraction(opts: {
+    prompt?: string;
+    response?: string;
+    model?: string;
+    provider?: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    costUsd?: number;
+    metadata?: Record<string, unknown>;
+  }): Promise<boolean> {
+    try {
+      await this.request<unknown>('POST', '/interaction', {
+        agent_id: this.agentId,
+        prompt: opts.prompt ?? '',
+        response: opts.response ?? '',
+        model: opts.model ?? '',
+        provider: opts.provider ?? '',
+        input_tokens: opts.inputTokens ?? 0,
+        output_tokens: opts.outputTokens ?? 0,
+        cost_usd: opts.costUsd ?? 0,
+        metadata: opts.metadata ?? {},
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ===========================================================================
+  // Deregistration
+  // ===========================================================================
+
+  /**
+   * Deregister this agent from Zentinelle.
+   *
+   * Cleanly removes the agent registration on shutdown. Different from
+   * shutdown() which just stops local timers.
+   */
+  async deregister(): Promise<boolean> {
+    if (!this.registered) return true;
+    try {
+      await this.request<unknown>('POST', '/deregister', {
+        agent_id: this.agentId,
+      });
+      this.registered = false;
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // ===========================================================================
   // Lifecycle
   // ===========================================================================
 

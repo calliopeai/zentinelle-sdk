@@ -796,6 +796,54 @@ func (c *Client) Heartbeat(
 	}, nil
 }
 
+// LogInteractionOptions specifies fields for direct interaction logging.
+type LogInteractionOptions struct {
+	Prompt       string
+	Response     string
+	Model        string
+	Provider     string
+	InputTokens  int
+	OutputTokens int
+	CostUSD      float64
+	Metadata     map[string]interface{}
+}
+
+// LogInteraction logs an AI interaction directly (separate from evaluate).
+// Use when calling a provider SDK directly but still tracking for compliance.
+func (c *Client) LogInteraction(ctx context.Context, opts LogInteractionOptions) error {
+	body := map[string]interface{}{
+		"agent_id":      c.agentID,
+		"prompt":        opts.Prompt,
+		"response":      opts.Response,
+		"model":         opts.Model,
+		"provider":      opts.Provider,
+		"input_tokens":  opts.InputTokens,
+		"output_tokens": opts.OutputTokens,
+		"cost_usd":      opts.CostUSD,
+		"metadata":      opts.Metadata,
+	}
+	if body["metadata"] == nil {
+		body["metadata"] = map[string]interface{}{}
+	}
+	_, err := c.request(ctx, "POST", "/interaction", body, false)
+	return err
+}
+
+// Deregister cleanly removes the agent registration from Zentinelle.
+// Different from Shutdown() which just stops local goroutines.
+func (c *Client) Deregister(ctx context.Context) error {
+	if !c.registered {
+		return nil
+	}
+	_, err := c.request(ctx, "POST", "/deregister", map[string]interface{}{
+		"agent_id": c.agentID,
+	}, false)
+	if err == nil {
+		c.registered = false
+	}
+	return err
+}
+
 // Shutdown gracefully shuts down the client.
 // Safe to call multiple times.
 func (c *Client) Shutdown() {
