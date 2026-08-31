@@ -85,6 +85,25 @@ jobs:
           pip install -e plugins/langchain/
           python -m pytest plugins/langchain/tests/ -q
 
+  test-openai-agents-plugin:
+    runs-on: ubuntu-latest
+    needs: test-python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install and test
+        run: |
+          pip install -e python/
+          pip install pytest-asyncio
+          # --no-deps: the tests stub the Agents SDK rather than install it,
+          # the way every other plugin here is tested.
+          pip install -e plugins/openai-agents/ --no-deps
+          python -m pytest plugins/openai-agents/tests/ -q
+
   test-agent-plugin:
     runs-on: ubuntu-latest
     strategy:
