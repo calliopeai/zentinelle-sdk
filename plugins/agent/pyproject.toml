@@ -56,3 +56,28 @@ packages = ["zentinelle_agent"]
 
 [tool.hatch.build.targets.wheel.sources]
 "zentinelle_agent/skill" = "zentinelle_agent/skill"
+
+[tool.ruff]
+target-version = "py39"
+# 120, matching the wider Calliope Python convention.
+line-length = 120
+
+[tool.ruff.lint]
+# Selected explicitly. Relying on a linter's default rule set is exactly as
+# unstable as not pinning its version: ruff widened its defaults, and this
+# job went red on every branch when it did, with no commit to blame (#28).
+#
+# E/F are the real bugs — undefined names, unused imports, syntax-adjacent
+# mistakes. I is import ordering.
+#
+# FA is here because it is not stylistic for this package. `requires-python`
+# is >=3.9, and a PEP 604 annotation like `str | None` in a function signature
+# is evaluated at def time, so it raises TypeError on import under 3.9. That
+# is precisely what broke the 3.9 job, and FA102 had been reporting it all
+# along — it was invisible only because the lint step failed first and the
+# import test never ran.
+#
+# Left out: BLE001, S110 and SIM117, which are judgments about this plugin's
+# error handling, and EXE001 about its file mode. Worth considering, but as a
+# decision somebody makes rather than one inherited from a version bump.
+select = ["E", "F", "I", "FA"]

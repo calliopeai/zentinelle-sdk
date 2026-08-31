@@ -141,7 +141,11 @@ jobs:
       - name: Lint
         working-directory: plugins/agent
         run: |
-          pip install ruff
+          # Pinned. Unpinned, this job's result depended on the day it ran:
+          # a newer ruff picked up rules the previous one had not and turned
+          # the same unchanged code red on every branch (#28). A lint change
+          # should arrive as a deliberate version bump, not as a surprise.
+          pip install ruff==0.16.5
           ruff check zentinelle_agent/
 
       - name: Test imports

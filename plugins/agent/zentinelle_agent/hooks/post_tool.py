@@ -21,8 +21,8 @@ import json
 import os
 import sys
 import threading
-import urllib.request
 import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 _TIMEOUT = 3  # seconds

@@ -23,8 +23,8 @@ Claude Code passes hook input as JSON on stdin:
 import json
 import os
 import sys
-import urllib.request
 import urllib.error
+import urllib.request
 
 _TIMEOUT = 5  # seconds — keep latency low; this is in the hot path
 
