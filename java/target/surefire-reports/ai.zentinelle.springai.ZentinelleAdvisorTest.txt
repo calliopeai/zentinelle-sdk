@@ -1,0 +1,4 @@
+-------------------------------------------------------------------------------
+Test set: ai.zentinelle.springai.ZentinelleAdvisorTest
+-------------------------------------------------------------------------------
+Tests run: 8, Failures: 0, Errors: 0, Skipped: 0, Time elapsed: 58.45 s -- in ai.zentinelle.springai.ZentinelleAdvisorTest
