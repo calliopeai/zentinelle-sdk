@@ -83,7 +83,7 @@ jobs:
 
       - name: Install and test
         run: |
-          pip install -e python/
+          pip install -e python/ pytest
           pip install langchain-core
           pip install -e plugins/langchain/
           python -m pytest plugins/langchain/tests/ -q
