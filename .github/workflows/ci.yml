@@ -20,7 +20,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install SDK
-        run: pip install -e python/
+        # pytest is named explicitly. It used to be present because the GitHub
+        # runner image happened to ship it, so this job began failing with
+        # "No module named pytest" on a runner update, without a commit here.
+        run: pip install -e python/ pytest
 
       - name: Run tests
         run: python -m pytest tests/test_client.py -q
