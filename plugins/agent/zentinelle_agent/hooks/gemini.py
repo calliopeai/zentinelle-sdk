@@ -4,7 +4,6 @@ Write Zentinelle hooks into .gemini/settings.json for a project.
 Adds pre-tool and post-tool hooks for Gemini CLI.
 """
 import json
-import os
 import shutil
 import sys
 from pathlib import Path

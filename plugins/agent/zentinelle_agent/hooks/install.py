@@ -6,7 +6,6 @@ with Zentinelle env vars sourced from the caller's environment or explicit args.
 Preserves any existing hooks configuration.
 """
 import json
-import os
 import shutil
 import sys
 from pathlib import Path
