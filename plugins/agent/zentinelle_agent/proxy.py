@@ -13,6 +13,8 @@ Configure Claude Code:
 The Zentinelle backend proxy strips X-Zentinelle-Key for agent identification,
 evaluates policies, and forwards clean requests to the provider API.
 """
+from __future__ import annotations
+
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
