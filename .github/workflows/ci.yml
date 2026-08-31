@@ -99,9 +99,12 @@ jobs:
       matrix:
         plugin:
           - agno
+          - bee-agent
+          - dspy
           - google-adk
           - haystack
           - letta
+          - mistral-agents
           - openai-agents
           - pydantic-ai
           - smolagents

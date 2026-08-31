@@ -46,6 +46,7 @@
         <jackson.version>2.22.1</jackson.version>
         <okhttp.version>4.12.0</okhttp.version>
         <slf4j.version>2.0.9</slf4j.version>
+        <spring-ai.version>1.0.0</spring-ai.version>
     </properties>
 
     <dependencies>
@@ -73,6 +74,22 @@
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
             <version>${slf4j.version}</version>
+        </dependency>
+
+        <!--
+            Spring AI, for the ZentinelleAdvisor governance integration.
+
+            `optional` on purpose: an application that does not use Spring AI
+            must not pull the whole Spring AI object graph in transitively just
+            by depending on this SDK. A Spring AI application already has these
+            on its own classpath, so the advisor resolves there; anyone else
+            never loads the class.
+        -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-client-chat</artifactId>
+            <version>${spring-ai.version}</version>
+            <optional>true</optional>
         </dependency>
 
         <!-- Testing -->
