@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zentinelle-smolagents"
+version = "0.1.0"
+description = "Zentinelle integration for smolagents - AI Agent Governance"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Calliope Labs", email = "engineering@calliope.ai" }
+]
+keywords = [
+    "agents",
+    "ai",
+    "governance",
+    "guardrails",
+    "huggingface",
+    "smolagents",
+    "zentinelle",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "zentinelle>=0.1.0",
+    "smolagents>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[project.urls]
+Homepage = "https://zentinelle.ai"
+Documentation = "https://docs.zentinelle.ai/integrations/smolagents"
+Repository = "https://github.com/calliopeai/zentinelle-sdk"
+Smolagents = "https://github.com/huggingface/smolagents"
+
+[tool.hatch.build.targets.wheel]
+packages = ["zentinelle_smolagents"]

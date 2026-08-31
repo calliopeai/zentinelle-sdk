@@ -10,23 +10,18 @@ application makes deliberately.
 """
 from __future__ import annotations
 
-import os
 from typing import Any, Optional
 
-DEFAULT_PROVIDER = "openai"
-
-
-def gateway_base_url(gateway_url: str, provider: str = DEFAULT_PROVIDER) -> str:
-    """The base URL an OpenAI client should use to reach ``provider``.
-
-    The gateway routes on path: ``/proxy/{provider}/...`` is explicit, and it
-    supplies the ``/v1`` the OpenAI client omits from a base URL it will append
-    to. ``/v1`` alone would also be routed, by auto-detection, but naming the
-    provider means a deployment that fronts several providers keeps working
-    when the auto-detection rules change.
-    """
-    base = gateway_url.rstrip("/")
-    return f"{base}/proxy/{provider}/v1"
+# One implementation, in the core SDK, because every framework plugin needs the
+# same routing rule and seven copies of it is seven places to fix a change.
+# Re-exported here because `gateway_base_url` is part of this package's public
+# API and callers import it from here.
+from zentinelle.gateway import (  # noqa: F401
+    DEFAULT_PROVIDER,
+    gateway_base_url,
+    resolve_gateway_key,
+    resolve_gateway_url,
+)
 
 
 def gateway_client(
@@ -46,25 +41,9 @@ def gateway_client(
     """
     from openai import AsyncOpenAI  # imported late: only needed when configuring
 
-    gateway_url = gateway_url or os.environ.get("ZENTINELLE_GATEWAY_URL")
-    if not gateway_url:
-        raise ValueError(
-            "No gateway URL. Pass gateway_url= or set ZENTINELLE_GATEWAY_URL."
-        )
-
-    api_key = (
-        api_key
-        or os.environ.get("ZENTINELLE_API_KEY")
-        or os.environ.get("OPENAI_API_KEY")
-        # The OpenAI client refuses to construct without one. The gateway is
-        # what decides whether this request is allowed, so a placeholder here
-        # is a rejected request rather than an unauthenticated call to OpenAI.
-        or "zentinelle-gateway"
-    )
-
     return AsyncOpenAI(
-        base_url=gateway_base_url(gateway_url, provider),
-        api_key=api_key,
+        base_url=gateway_base_url(resolve_gateway_url(gateway_url), provider),
+        api_key=resolve_gateway_key(api_key),
         **client_kwargs,
     )
 
