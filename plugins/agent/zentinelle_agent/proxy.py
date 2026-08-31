@@ -15,7 +15,7 @@ evaluates policies, and forwards clean requests to the provider API.
 """
 import logging
 import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import httpx
 
