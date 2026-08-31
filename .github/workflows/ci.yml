@@ -88,9 +88,23 @@ jobs:
           pip install -e plugins/langchain/
           python -m pytest plugins/langchain/tests/ -q
 
-  test-openai-agents-plugin:
+  # The framework plugins whose tests stub their framework rather than install
+  # it, which is how every plugin here is tested. One job over a matrix: the
+  # install and the command are identical, only the directory differs.
+  test-framework-plugins:
     runs-on: ubuntu-latest
     needs: test-python
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin:
+          - agno
+          - google-adk
+          - haystack
+          - letta
+          - openai-agents
+          - pydantic-ai
+          - smolagents
     steps:
       - uses: actions/checkout@v4
 
@@ -100,12 +114,10 @@ jobs:
 
       - name: Install and test
         run: |
-          pip install -e python/
-          pip install pytest-asyncio
-          # --no-deps: the tests stub the Agents SDK rather than install it,
-          # the way every other plugin here is tested.
-          pip install -e plugins/openai-agents/ --no-deps
-          python -m pytest plugins/openai-agents/tests/ -q
+          pip install -e python/ pytest pytest-asyncio
+          # --no-deps: the framework is stubbed in the tests, not installed.
+          pip install -e plugins/${{ matrix.plugin }}/ --no-deps
+          python -m pytest plugins/${{ matrix.plugin }}/tests/ -q
 
   test-agent-plugin:
     runs-on: ubuntu-latest
