@@ -27,8 +27,12 @@ def _install_smolagents_stubs():
     class OpenAIModel(Model):
         def __init__(self, model_id=None, api_base=None, api_key=None, **kwargs):
             self.model_id = model_id
-            self.api_base = api_base
-            self.api_key = api_key
+            # The real class does not keep `api_base`: it folds it into the
+            # kwargs it hands the OpenAI client, as `base_url`. The stub used
+            # to store `api_base` instead, which made the routing test pass
+            # against the stub's own invention rather than against anything
+            # smolagents does. Checked against smolagents 1.26.
+            self.client_kwargs = {"api_key": api_key, "base_url": api_base}
 
     models.Model = Model
     models.OpenAIModel = OpenAIModel
@@ -280,9 +284,15 @@ def test_the_step_callback_never_raises():
 # ---- gateway routing ----------------------------------------------------
 
 
-def test_gateway_model_uses_the_api_base_kwarg():
-    """smolagents names it api_base on OpenAIModel, not base_url."""
+def test_gateway_model_points_the_client_at_the_gateway():
+    """smolagents takes `api_base` and hands the client `base_url`.
+
+    Asserted on the kwargs the client actually receives, not on an attribute of
+    the model: `OpenAIModel` does not keep `api_base`, and a test that checked
+    for one would be checking the stub rather than smolagents.
+    """
     model = gateway_model("gpt-5", gateway_url="https://gw.internal", api_key="k")
 
-    assert model.api_base == "https://gw.internal/proxy/openai/v1"
+    assert model.client_kwargs["base_url"] == "https://gw.internal/proxy/openai/v1"
+    assert model.client_kwargs["api_key"] == "k"
     assert model.model_id == "gpt-5"
