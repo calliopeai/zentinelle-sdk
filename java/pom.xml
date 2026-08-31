@@ -46,7 +46,7 @@
         <jackson.version>2.22.1</jackson.version>
         <okhttp.version>4.12.0</okhttp.version>
         <slf4j.version>2.0.9</slf4j.version>
-        <spring-ai.version>1.0.0</spring-ai.version>
+        <spring-ai.version>1.0.7</spring-ai.version>
     </properties>
 
     <dependencies>
