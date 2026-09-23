@@ -62,12 +62,12 @@ class FakeZentinelle:
         self.server.shutdown()
 
 
-def run_hook(url, extra_env=None):
+def run_hook(url, extra_env=None, hook_input=None):
     env = {k: v for k, v in os.environ.items() if not k.startswith("ZENTINELLE_")}
     env.update({"ZENTINELLE_ENDPOINT": url, "ZENTINELLE_KEY": "sk_agent_host", "ZENTINELLE_HARNESS": "claude",
                 "ZENTINELLE_USER_ID": "dev@example.com"})
     env.update(extra_env or {})
-    proc = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(HOOK_INPUT), capture_output=True,
+    proc = subprocess.run([sys.executable, str(HOOK)], input=json.dumps(hook_input or HOOK_INPUT), capture_output=True,
                           text=True, env=env, timeout=30)
     return proc.returncode, proc.stdout
 
@@ -160,3 +160,12 @@ def test_without_a_harness_the_legacy_request_is_unchanged(zentinelle):
     body = fake.requests[0][2]
     assert body["context"]["source"] == "claude_code_hook"
     assert "harness" not in body["context"]
+
+
+def test_calliope_cli_policy_command_shape_is_accepted(zentinelle):
+    fake = zentinelle([{"decision": "deny", "reason": "no"}])
+    code, _ = run_hook(fake.url, {"ZENTINELLE_HARNESS": "calliope", "ZENTINELLE_SESSION_ID": "cli-1"},
+                       {"id": "call_9", "name": "bash", "arguments": {"command": "ls"}})
+    assert code == 2
+    assert fake.requests[0][2]["context"] == {"harness": "calliope", "session_id": "cli-1", "tool_call_id": "call_9",
+                                              "tool_name": "bash", "tool_input": {"command": "ls"}}

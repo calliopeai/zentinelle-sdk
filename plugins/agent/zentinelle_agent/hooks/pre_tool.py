@@ -68,6 +68,11 @@ def main():
 
     harness = os.environ.get("ZENTINELLE_HARNESS", "")
     if harness:
+        # calliope-cli's policy.command sends {id, name, arguments}; same
+        # meaning, so one hook serves both harnesses.
+        if "tool_name" not in hook_input and "name" in hook_input:
+            hook_input = {"tool_name": hook_input.get("name"), "tool_input": hook_input.get("arguments", {}),
+                          "tool_use_id": hook_input.get("id"), "session_id": os.environ.get("ZENTINELLE_SESSION_ID")}
         _agent_host(endpoint, api_key, harness, hook_input, fail_open)
 
     # Call Zentinelle evaluate endpoint
