@@ -158,4 +158,10 @@ jobs:
         working-directory: plugins/agent
         run: |
           python -m zentinelle_agent.cli --help
+
+      - name: Hook tests
+        working-directory: plugins/agent
+        run: |
+          pip install pytest
+          python -m pytest tests -q
           python -m zentinelle_agent.cli proxy --help
