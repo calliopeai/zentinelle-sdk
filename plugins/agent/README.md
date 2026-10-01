@@ -109,6 +109,20 @@ best-effort delivery, and always exits 0. It cannot authorize or replay a tool.
 
 ## Coverage limits
 
+The `zentinelle_agent.hooks.antigravity` module normalizes observed Antigravity CLI
+`PreToolUse`/`PostToolUse` payloads through the same strict policy/audit transport.
+It preserves native `conversationId`, `stepIdx`, exact `toolCall.args`, workspace,
+transcript, artifact and model metadata with source `antigravity_cli_hook`. The
+central session identifier is the emitted conversation UUID; no call ID is
+invented, and approval holds cannot borrow trajectory indices as call identity.
+After policy allows, native `decision: ask` continues existing permission and
+Always Allow behavior. Native `allow` would grant permission. Policy errors deny;
+post audit reports actual native error metadata and returns `{}` without replay.
+The module is not a plugin installer: native discovery, skills, bounded supervision,
+installation lifecycle and actual effects belong in the owned
+[Antigravity tools](https://github.com/calliopeai/calliope-antigravity-tools/issues/1)
+integration. Other Antigravity surfaces and providers require separate qualification.
+
 The SDK tests exercise actual hook subprocesses, HTTP exchanges, and settings files.
 They do not prove native tool effects across every harness version or platform.
 Native harness qualification and owned per-harness installers remain tracked in

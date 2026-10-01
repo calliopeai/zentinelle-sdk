@@ -26,6 +26,7 @@ _NATIVE_SOURCES = {
     "BeforeTool": "gemini_cli_hook",
     "tool.execute.before": "opencode_plugin",
     "preToolUse": "copilot_cli_hook",
+    "antigravity.PreToolUse": "antigravity_cli_hook",
 }
 
 
@@ -70,13 +71,16 @@ def invocation(event, env):
     context = {"session_id": session, "tool_name": tool, "tool_input": args}
     if call_id:
         context["tool_call_id"] = call_id
-    for name in ("chat_id", "turn_id", "cwd", "model", "permission_mode", "timestamp"):
+    for name in ("chat_id", "turn_id", "cwd", "model", "permission_mode", "timestamp",
+                 "conversationId", "stepIdx", "workspacePaths", "transcriptPath", "artifactDirectoryPath", "modelName"):
         if name in event:
             context[name] = event[name]
     harness = env.get("ZENTINELLE_HARNESS", "")
     if event.get("hook_event_name") == "tool.execute.before" and harness and harness != "opencode":
         raise PolicyError("Conflicting native harness identity")
     if event.get("hook_event_name") == "preToolUse" and harness and harness != "copilot":
+        raise PolicyError("Conflicting native harness identity")
+    if event.get("hook_event_name") == "antigravity.PreToolUse" and harness and harness != "antigravity":
         raise PolicyError("Conflicting native harness identity")
     if harness:
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,49}", harness):

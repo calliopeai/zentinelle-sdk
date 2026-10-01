@@ -20,6 +20,7 @@ _NATIVE_SOURCES = {
     "AfterTool": "gemini_cli_hook",
     "tool.execute.after": "opencode_plugin",
     "postToolUse": "copilot_cli_hook",
+    "antigravity.PostToolUse": "antigravity_cli_hook",
 }
 
 
@@ -45,7 +46,9 @@ def emit(event, env):
             return 0
         details = {"tool": event.get("tool_name"), "inputs": event.get("tool_input"),
                    "outputs": event.get("tool_response"), "source": _NATIVE_SOURCES[event["hook_event_name"]]}
-        for name in ("session_id", "tool_use_id", "tool_call_id", "chat_id", "turn_id", "timestamp"):
+        for name in ("session_id", "tool_use_id", "tool_call_id", "chat_id", "turn_id", "timestamp",
+                     "conversationId", "stepIdx", "workspacePaths", "transcriptPath", "artifactDirectoryPath",
+                     "modelName"):
             if name in event:
                 details[name] = event[name]
         body = {"events": [{"type": "tool_call", "category": "audit", "payload": details,
