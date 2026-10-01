@@ -18,6 +18,10 @@ from uuid import uuid4
 import pytest
 
 HOOK = Path(__file__).resolve().parents[1] / "zentinelle_agent" / "hooks" / "pre_tool.py"
+if os.environ.get("ZENTINELLE_TEST_INSTALLED_HOOKS") == "1":
+    from zentinelle_agent.hooks import pre_tool
+
+    HOOK = Path(pre_tool.__file__)
 HOOK_INPUT = {
     "session_id": "a41f0c2e",
     "tool_use_id": "toolu_01",
@@ -245,4 +249,76 @@ def test_calliope_cli_policy_command_shape_is_accepted(zentinelle):
         "tool_call_id": "call_9",
         "tool_name": "bash",
         "tool_input": {"command": "ls"},
+    }
+
+
+OPENCODE_INPUT = {
+    "hook_event_name": "tool.execute.before",
+    "session_id": "ses_opencode_native",
+    "tool_call_id": "call_opencode_native",
+    "tool_name": "bash",
+    "tool_input": {"command": "printf 'a $ b'", "description": "Exact native arguments"},
+    "cwd": "/project with spaces",
+}
+
+
+def test_opencode_uses_native_source_and_exact_identity(zentinelle):
+    fake = zentinelle([{"decision": "allow", "allowed": True}])
+    code, _ = run_hook(fake.url, {"ZENTINELLE_HARNESS": ""}, OPENCODE_INPUT)
+    assert code == 0
+    assert fake.requests[0][2]["context"] == {
+        "source": "opencode_plugin",
+        "tool": "bash",
+        "tool_name": "bash",
+        "tool_input": OPENCODE_INPUT["tool_input"],
+        "session_id": OPENCODE_INPUT["session_id"],
+        "tool_call_id": OPENCODE_INPUT["tool_call_id"],
+        "cwd": OPENCODE_INPUT["cwd"],
+    }
+
+
+@pytest.mark.parametrize("response", [
+    {"decision": "deny", "allowed": False},
+    {"decision": "ask", "allowed": False},
+    {"decision": "allow", "allowed": False},
+    {"allowed": True},
+])
+def test_opencode_standalone_only_explicit_consistent_allow(zentinelle, response):
+    fake = zentinelle([response])
+    code, _ = run_hook(fake.url, {"ZENTINELLE_HARNESS": ""}, OPENCODE_INPUT)
+    assert code == 2
+    assert len(fake.requests) == 1
+
+
+@pytest.mark.parametrize("field", ["tool_call_id", "session_id", "tool_name", "tool_input"])
+def test_opencode_missing_native_identity_refused_before_http(zentinelle, field):
+    fake = zentinelle([])
+    event = {key: value for key, value in OPENCODE_INPUT.items() if key != field}
+    code, _ = run_hook(fake.url, {"ZENTINELLE_HARNESS": ""}, event)
+    assert code == 2
+    assert fake.requests == []
+
+
+def test_opencode_conflicting_host_identity_refused(zentinelle):
+    fake = zentinelle([])
+    code, _ = run_hook(fake.url, {"ZENTINELLE_HARNESS": "claude"}, OPENCODE_INPUT)
+    assert code == 2
+    assert fake.requests == []
+
+
+def test_opencode_audit_retains_source_and_native_result(zentinelle):
+    fake = zentinelle([{}])
+    event = {**OPENCODE_INPUT, "hook_event_name": "tool.execute.after",
+             "tool_response": {"title": "Fixture", "output": "native output", "metadata": {"exit": 0}}}
+    env = {key: value for key, value in os.environ.items() if not key.startswith("ZENTINELLE_")}
+    env.update(ZENTINELLE_ENDPOINT=fake.url, ZENTINELLE_KEY="sk_fixture_not_real")
+    result = subprocess.run([sys.executable, str(HOOK.with_name("post_tool.py"))],
+                            input=json.dumps(event), text=True, capture_output=True, env=env, timeout=10)
+    assert result.returncode == 0
+    assert len(fake.requests) == 1
+    body = fake.requests[0][2]
+    assert fake.requests[0][1] == "/api/zentinelle/v1/events"
+    assert body["events"][0]["payload"] == {
+        "source": "opencode_plugin", "tool": "bash", "inputs": event["tool_input"],
+        "outputs": event["tool_response"], "session_id": event["session_id"], "tool_call_id": event["tool_call_id"],
     }

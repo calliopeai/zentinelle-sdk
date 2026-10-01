@@ -21,6 +21,11 @@ else:
 _EVALUATE = "/api/zentinelle/v1/evaluate"
 _POLL_SECONDS = 2
 _MAX_HOLD_SECONDS = 300
+_NATIVE_SOURCES = {
+    "PreToolUse": "claude_code_hook",
+    "BeforeTool": "gemini_cli_hook",
+    "tool.execute.before": "opencode_plugin",
+}
 
 
 def _identity(value, name, required=True):
@@ -49,10 +54,11 @@ def invocation(event, env):
         if "session_id" in event and event["session_id"] != session:
             raise PolicyError("Conflicting session identity")
     else:
-        if event.get("hook_event_name") not in ("PreToolUse", "BeforeTool"):
+        if event.get("hook_event_name") not in _NATIVE_SOURCES:
             raise PolicyError("Invalid pre-tool event")
         tool, args = event.get("tool_name"), event.get("tool_input")
-        call_id = _identity(event.get("tool_use_id", event.get("tool_call_id")), "tool call identity", False)
+        call_id = _identity(event.get("tool_use_id", event.get("tool_call_id")), "tool call identity",
+                            event.get("hook_event_name") == "tool.execute.before")
         if "tool_use_id" in event and "tool_call_id" in event and event["tool_use_id"] != event["tool_call_id"]:
             raise PolicyError("Conflicting tool call identity")
         session = event.get("session_id")
@@ -67,12 +73,14 @@ def invocation(event, env):
         if name in event:
             context[name] = event[name]
     harness = env.get("ZENTINELLE_HARNESS", "")
+    if event.get("hook_event_name") == "tool.execute.before" and harness and harness != "opencode":
+        raise PolicyError("Conflicting native harness identity")
     if harness:
         if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,49}", harness):
             raise PolicyError("Invalid harness identity")
         context["harness"] = harness
     else:
-        source = "gemini_cli_hook" if event.get("hook_event_name") == "BeforeTool" else "claude_code_hook"
+        source = _NATIVE_SOURCES.get(event.get("hook_event_name"), "claude_code_hook")
         context.update(tool=tool, source="calliope_cli_policy" if cli else source)
     body = {"action": "tool_call", "context": context}
     for source, target in (("ZENTINELLE_AGENT_ID", "agent_id"), ("ZENTINELLE_USER_ID", "user_id")):
