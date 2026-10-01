@@ -1,168 +1,149 @@
 # zentinelle-agent
 
-Zentinelle governance integration for AI coding agents — Claude Code, Codex, Gemini, and any OpenAI/Anthropic/Google-compatible agent.
+Owned Zentinelle hooks and a provider proxy for coding agents. These adapters use
+native extension points; they do not modify or fork harness runtimes.
 
-Two complementary modes — use one or both:
+| Integration | Before execution | After execution |
+|---|---|---|
+| Claude Code settings | `PreToolUse` policy check | `PostToolUse` best-effort audit |
+| Gemini CLI settings | `BeforeTool` policy check | `AfterTool` best-effort audit |
+| Calliope CLI policy command | Exact `{id, name, arguments}` evaluation | Host-owned audit |
+| Provider proxy | Evaluation of requests routed through the proxy | Service-managed provider handling |
 
-| Mode | What it does | Works with |
-|------|-------------|------------|
-| **Hooks** | Intercepts every tool call via PreToolUse/PostToolUse hooks | Claude Code |
-| **Proxy** | Routes all LLM API calls through Zentinelle for policy enforcement | Any agent (Claude Code, Codex, Gemini, custom) |
+Provider request governance does not authorize individual local tool effects.
+For the native Codex plugin, use the separately maintained
+[calliope-codex-tools](https://github.com/calliopeai/calliope-codex-tools) package.
+Release and cross-harness qualification are tracked in
+[rollout #400](https://github.com/calliopeai/calliope-cli/issues/400).
 
----
+## Install and configure native hooks
 
-## Installation
+Requires Python 3.9+ and a POSIX shell. Install the released package with
+`pip install zentinelle-agent`; when testing unreleased source, use
+`pip install ./plugins/agent` from this repository.
 
-```bash
-pip install zentinelle-agent
-```
-
----
-
-## Quick start by agent
-
-### Claude Code
-
-```bash
-# Option A: Hooks (tool-level enforcement)
-zentinelle-agent install \
-  --endpoint http://localhost:8080 \
-  --key sk_agent_your_key \
-  --agent-id claude-code-dev
-
-# Option B: Proxy (API-level enforcement)
-zentinelle-agent proxy --endpoint http://localhost:8080 --key sk_agent_your_key --provider anthropic
-# Then in another terminal:
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8742
-claude
-```
-
-### Codex (OpenAI)
+Supply a scoped agent credential through your environment or secret manager.
+Keep this environment available when launching the harness:
 
 ```bash
-# Start the proxy
-zentinelle-agent proxy --endpoint http://localhost:8080 --key sk_agent_your_key --provider openai
-# Then in another terminal:
-export OPENAI_BASE_URL=http://127.0.0.1:8742
-codex
+export ZENTINELLE_ENDPOINT=https://your-zentinelle.example
+# Set ZENTINELLE_KEY from your secret manager, without placing it in command history.
+export ZENTINELLE_AGENT_ID=your-registered-agent
+export ZENTINELLE_USER_ID=your-policy-subject
+zentinelle-agent install          # Claude Code, current project
+# Or:
+zentinelle-agent install-gemini   # Gemini CLI, current project
 ```
 
-### Gemini
+Restart the harness to load the settings. `--project-dir` selects an existing
+project. Claude's `--mode pre|post|both` defaults to both; post-only mode supplies
+audit without a pre-execution policy check.
 
-**Mode A: Hooks (recommended for tool-level enforcement)**
-```bash
-zentinelle-agent install-gemini \
-  --endpoint http://localhost:8080 \
-  --key sk_agent_your_key \
-  --agent-id gemini-cli-dev
-```
-Restart your Gemini CLI session to activate.
+Settings contain the installed Python hook path and `ZENTINELLE_REQUIRED=1`.
+Endpoint, key, agent ID, and user ID are inherited at execution, never stored in
+settings. Legacy `--endpoint`, `--key`, and `--agent-id` arguments remain accepted
+for install-time validation; they do not configure future harness processes.
+Prefer environment variables so credentials do not appear in process arguments.
+A required hook refuses execution when its runtime configuration is missing.
+Harness environment filtering can remove credentials; validate credential delivery
+in the target harness version before rollout. Do not disable organization security
+settings to make an integration work.
 
-**Mode B: Proxy (API-level enforcement)**
-```bash
-# Start the proxy
-zentinelle-agent proxy --endpoint http://localhost:8080 --key sk_agent_your_key --provider google
-```
-> **Note:** The official Google Generative AI SDKs do **not** natively respect `GOOGLE_API_BASE`. To use the proxy, you must initialize your client programmatically:
-> ```python
-> # Python
-> genai.configure(api_key=..., client_options={"api_endpoint": "http://127.0.0.1:8742"})
-> ```
-> ```javascript
-> // Node.js
-> const genAI = new GoogleGenerativeAI(apiKey);
-> const model = genAI.getGenerativeModel({ model: "...", baseUrl: "http://127.0.0.1:8742" });
-> ```
-
----
-
-## Hooks mode (Claude Code only)
-
-Hooks intercept tool calls at the Claude Code layer:
-
-- **PreToolUse** — calls `/api/zentinelle/v1/evaluate` before every tool invocation. If Zentinelle blocks the action (exit code 2), Claude Code shows the reason and skips the tool.
-- **PostToolUse** — emits an audit event to `/api/zentinelle/v1/events` after every tool call. Fire-and-forget, never blocks.
-
-### Setup
+Updates preserve unrelated settings and hooks, replace only handlers owned by this
+package, and migrate legacy commands only when they invoke the exact installed
+hook entrypoint. Invalid JSON, duplicate fields, symlinks, and an existing installer
+lock are refused without replacing settings. Writes use a private temporary file
+and atomic replacement; changes detected during installation are refused. Other
+editors do not participate in the installer lock, so retry if concurrent changes
+are reported. Repeating install or uninstall preserves unchanged file bytes.
 
 ```bash
-zentinelle-agent install \
-  --endpoint http://localhost:8080 \
-  --key sk_agent_your_key_here \
-  --agent-id my-agent
+zentinelle-agent status          # Inspect both harnesses without showing secrets
+zentinelle-agent uninstall       # Remove owned Claude hooks
+zentinelle-agent uninstall-gemini
+zentinelle-agent install-skill   # Install the bundled Claude setup skill
 ```
 
-Restart Claude Code to activate.
+Status confirms installed settings, not activation in a running harness.
+Uninstall preserves unrelated settings and does not create an absent settings file.
 
-### Options
+## Policy checks and human oversight
 
-```
---endpoint      Zentinelle base URL (or ZENTINELLE_ENDPOINT env var)
---key           Agent API key      (or ZENTINELLE_KEY env var)
---agent-id      Agent identifier   (default: claude-code)
---project-dir   Target project directory (default: current directory)
---fail-open     Allow tool calls when Zentinelle is unreachable
---mode          both | pre | post  (default: both)
-```
+Each configured pre-tool hook sends the original tool name, full input, and session
+to `/api/zentinelle/v1/evaluate`; source call, chat, and turn IDs are preserved when
+supplied. A missing session, malformed input, or conflicting invocation aliases is
+refused. Calliope CLI's JSON format requires a call ID and
+`ZENTINELLE_SESSION_ID`; the hook does not invent session identity.
 
-### Uninstall / Status
+Only a successful HTTP 200 response with an explicit, consistent
+`{"decision":"allow","allowed":true}` releases the hook. An allow exits 0 with
+no permission override, preserving ordinary harness confirmation. Denials use
+the harness's native output shape and exit 2. Unknown decisions, inconsistent
+fields, invalid JSON, and network errors refuse execution, even when the legacy
+`ZENTINELLE_FAIL_OPEN=1` environment setting is present. Install-time `--fail-open`
+is rejected. Language SDK clients retain their separate availability options.
+
+Transport accepts HTTPS, with HTTP allowed only for literal loopback endpoints.
+Redirects are refused without forwarding credentials. Input and response bodies
+are limited to 1 MiB; input collection and each HTTP exchange have a total five
+second deadline, including slow response bodies. Hook errors never echo remote
+reason strings, approval tokens, or credentials.
+
+Trusted agent-host callers can set `ZENTINELLE_HARNESS` and use
+`ZENTINELLE_AGENT_HOST_KEY` instead of `ZENTINELLE_KEY`. Host credentials belong in
+the trusted host process; do not inject them into unmodified third-party harnesses.
+If both key variables are set, they must agree. See the backend's canonical
+[agent-host contract](https://github.com/calliopeai/zentinelle/blob/main/docs/agent-host.md).
+
+In host mode an `ask` holds the original invocation, requiring a canonical request
+UUID, source call identity, and future expiry. The hook polls
+`/api/zentinelle/v1/approvals/requests/<uuid>` and, after human approval, reevaluates
+the same subject, session, and exact input with the returned token. The token alone
+cannot authorize execution. Denial, expiry, malformed polling responses, changed
+policy, or connection failure refuses the tool. The hold is capped at 300 seconds;
+later polling responses cannot extend its original deadline. Non-host `ask`
+responses refuse execution rather than inventing approval authority.
+
+Post-tool audit preserves native source and invocation metadata, uses bounded
+best-effort delivery, and always exits 0. It cannot authorize or replay a tool.
+
+## Coverage limits
+
+The SDK tests exercise actual hook subprocesses, HTTP exchanges, and settings files.
+They do not prove native tool effects across every harness version or platform.
+Native harness qualification and owned per-harness installers remain tracked in
+the rollout issue. Windows settings installation is not supported by this POSIX
+installer.
+
+The harness controls hook loading and dispatch. Disabled, untrusted, skipped,
+crashed, or externally terminated hooks can limit coverage. Hosted provider tools
+that bypass local hook dispatch are outside this gate. Mandatory admission at
+dispatch belongs in an owned host, including Calliope CLI, with coverage verified
+against actual effects for each supported surface.
+
+## Provider proxy
 
 ```bash
-zentinelle-agent uninstall
-zentinelle-agent status
+zentinelle-agent proxy --provider anthropic  # or openai, google
 ```
 
----
+The proxy listens on `127.0.0.1:8742` by default and forwards requests to
+Zentinelle's `/proxy/<provider>/` endpoint with `X-Zentinelle-Key`.
+Provider API keys remain in provider authentication headers. Configure each
+client's supported base-URL setting to route requests through the proxy; traffic
+that does not use that endpoint is outside its coverage. `httpx>=0.24.0` supplies
+proxy streaming. Native hook transport uses the Python standard library.
 
-## Proxy mode (all agents)
+## Runtime environment
 
-The proxy routes all LLM API calls through Zentinelle for policy enforcement before they reach the upstream provider.
-
-```
-Agent → http://127.0.0.1:8742 → Zentinelle /proxy/<provider>/ → provider API
-         (local proxy)           (policy evaluation)
-```
-
-### Start the proxy
-
-```bash
-zentinelle-agent proxy \
-  --endpoint http://localhost:8080 \
-  --key sk_agent_your_key_here \
-  --provider anthropic   # or openai, google
-```
-
-### Supported providers
-
-| Provider | Upstream | Agent env var |
-|----------|----------|---------------|
-| `anthropic` | api.anthropic.com | `ANTHROPIC_BASE_URL` |
-| `openai` | api.openai.com | `OPENAI_BASE_URL` |
-| `google` | generativelanguage.googleapis.com | `GOOGLE_API_BASE` |
-
-### How it works
-
-1. Receives the request from your agent (with the real provider API key)
-2. Injects `X-Zentinelle-Key` to identify the agent
-3. Forwards to Zentinelle's proxy endpoint
-4. Zentinelle evaluates policies (rate limits, model restrictions, content filters)
-5. Streams the response back (SSE/streaming supported)
-
----
-
-## Environment variables
-
-| Variable | Description |
-|----------|-------------|
-| `ZENTINELLE_ENDPOINT` | Zentinelle base URL |
-| `ZENTINELLE_KEY` | Agent API key |
-| `ZENTINELLE_AGENT_ID` | Agent identifier |
-| `ZENTINELLE_FAIL_OPEN` | Set to `1` to allow tool calls when Zentinelle is offline |
-
----
-
-## Requirements
-
-- Python 3.9+
-- `httpx>=0.24.0` (for proxy streaming)
-- A running Zentinelle instance
+| Variable | Meaning |
+|---|---|
+| `ZENTINELLE_ENDPOINT` | Service base URL, optionally including a deployment prefix |
+| `ZENTINELLE_KEY` | Scoped agent key, also used by the proxy |
+| `ZENTINELLE_AGENT_ID` | Registered agent identity, when required |
+| `ZENTINELLE_USER_ID` | Policy subject, verified by the service in host mode |
+| `ZENTINELLE_SESSION_ID` | Calliope CLI policy-command session |
+| `ZENTINELLE_HARNESS` | Trusted host harness slug; enables canonical oversight polling |
+| `ZENTINELLE_AGENT_HOST_KEY` | Trusted host credential alias; keep it host-side |
+| `ZENTINELLE_REQUIRED` | `1` makes absent configuration refuse execution |
+| `ZENTINELLE_FAIL_OPEN` | Legacy value ignored by blocking hooks |

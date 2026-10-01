@@ -1,203 +1,167 @@
 #!/usr/bin/env python3
+"""Strict coding-agent pre-tool hook with bounded agent-host oversight.
+
+Only explicit valid allow releases a configured hook. ZENTINELLE_FAIL_OPEN
+never bypasses this gate; language-SDK availability settings remain separate.
 """
-Zentinelle PreToolUse hook for Claude Code.
+from __future__ import annotations
 
-Claude Code calls this script before every tool invocation. If this script
-exits with code 2 and writes JSON to stdout, Claude Code will block the tool
-call and show the reason to the user.
-
-Exit codes:
-  0  — allow (or Zentinelle unreachable and ZENTINELLE_FAIL_OPEN=1)
-  2  — block ({"decision": "block", "reason": "..."} written to stdout)
-
-Environment variables:
-  ZENTINELLE_ENDPOINT   Zentinelle base URL  (e.g. http://localhost:8000)
-  ZENTINELLE_KEY        Agent API key        (sk_agent_... or znt_...)
-  ZENTINELLE_AGENT_ID   Agent identifier
-  ZENTINELLE_FAIL_OPEN  Set to "1" to allow tool calls when Zentinelle is
-                        unreachable (default: block when unreachable)
-  ZENTINELLE_HARNESS    Set inside an agent host (calliope-vscode#790): the
-                        key is the host's agent_host key and this names the
-                        harness (claude, codex, calliope). The call then
-                        follows the agent host contract (zentinelle#377):
-                        host context, and an "ask" is held until a person
-                        approves or denies it (docs/agent-host.md).
-  ZENTINELLE_USER_ID    The person driving the session (approvals bind to it)
-
-Claude Code passes hook input as JSON on stdin:
-  {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}, ...}
-"""
 import json
 import os
+import re
 import sys
 import time
-import urllib.error
-import urllib.request
+from uuid import UUID
 
-_TIMEOUT = 5  # seconds — keep latency low; this is in the hot path
+if __package__:
+    from .transport import PolicyError, base_url, credential, decision, expiry, read_event, request_json
+else:
+    from transport import PolicyError, base_url, credential, decision, expiry, read_event, request_json
+
+_EVALUATE = "/api/zentinelle/v1/evaluate"
 _POLL_SECONDS = 2
+_MAX_HOLD_SECONDS = 300
 
 
-def _block(reason: str) -> None:
-    print(json.dumps({"decision": "block", "reason": reason}))
-    sys.exit(2)
+def _identity(value, name, required=True):
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or not value.strip() or len(value) > 255:
+        raise PolicyError("Missing or invalid " + name)
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise PolicyError("Invalid " + name)
+    return value
 
 
-def _allow() -> None:
-    sys.exit(0)
+def invocation(event, env):
+    if not isinstance(event, dict):
+        raise PolicyError("Invalid pre-tool event")
+    cli = "name" in event or "arguments" in event or "id" in event
+    if cli:
+        for left, right in (("name", "tool_name"), ("arguments", "tool_input"),
+                            ("id", "tool_use_id"), ("id", "tool_call_id")):
+            if left in event and right in event:
+                if json.dumps(event[left], sort_keys=True) != json.dumps(event[right], sort_keys=True):
+                    raise PolicyError("Conflicting tool invocation fields")
+        tool, args = event.get("name"), event.get("arguments")
+        call_id = _identity(event.get("id"), "tool call identity")
+        session = env.get("ZENTINELLE_SESSION_ID")
+        if "session_id" in event and event["session_id"] != session:
+            raise PolicyError("Conflicting session identity")
+    else:
+        if event.get("hook_event_name") not in ("PreToolUse", "BeforeTool"):
+            raise PolicyError("Invalid pre-tool event")
+        tool, args = event.get("tool_name"), event.get("tool_input")
+        call_id = _identity(event.get("tool_use_id", event.get("tool_call_id")), "tool call identity", False)
+        if "tool_use_id" in event and "tool_call_id" in event and event["tool_use_id"] != event["tool_call_id"]:
+            raise PolicyError("Conflicting tool call identity")
+        session = event.get("session_id")
+    tool = _identity(tool, "tool name")
+    session = _identity(session, "session identity")
+    if not isinstance(args, dict):
+        raise PolicyError("Missing exact tool input")
+    context = {"session_id": session, "tool_name": tool, "tool_input": args}
+    if call_id:
+        context["tool_call_id"] = call_id
+    for name in ("chat_id", "turn_id", "cwd", "model", "permission_mode"):
+        if name in event:
+            context[name] = event[name]
+    harness = env.get("ZENTINELLE_HARNESS", "")
+    if harness:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,49}", harness):
+            raise PolicyError("Invalid harness identity")
+        context["harness"] = harness
+    else:
+        source = "gemini_cli_hook" if event.get("hook_event_name") == "BeforeTool" else "claude_code_hook"
+        context.update(tool=tool, source="calliope_cli_policy" if cli else source)
+    body = {"action": "tool_call", "context": context}
+    for source, target in (("ZENTINELLE_AGENT_ID", "agent_id"), ("ZENTINELLE_USER_ID", "user_id")):
+        if env.get(source):
+            body[target] = _identity(env[source], target)
+    return body
+
+
+def _hold(endpoint, key, body, result):
+    approval = result.get("approval")
+    if not isinstance(approval, dict) or approval.get("status") != "pending":
+        raise PolicyError("Invalid approval hold")
+    if not body["context"].get("tool_call_id"):
+        raise PolicyError("Approval hold requires a source tool call identity")
+    request_id = approval.get("request_id")
+    try:
+        if str(UUID(request_id)) != request_id:
+            raise ValueError()
+    except Exception:
+        raise PolicyError("Invalid approval request identity") from None
+    timeout = approval.get("timeout_seconds")
+    if type(timeout) is not int or timeout <= 0:
+        raise PolicyError("Invalid approval timeout")
+    deadline = min(expiry(approval.get("expires_at")), time.monotonic() + min(timeout, _MAX_HOLD_SECONDS))
+    path = "/api/zentinelle/v1/approvals/requests/" + request_id
+    while time.monotonic() < deadline:
+        status = request_json(endpoint, key, path, deadline=deadline)
+        if status.get("request_id") != request_id:
+            raise PolicyError("Approval request identity changed")
+        deadline = min(deadline, expiry(status.get("expires_at")))
+        state = status.get("status")
+        if state == "approved":
+            token = status.get("approval_token")
+            if not isinstance(token, str) or not token.strip() or len(token) > 8192:
+                raise PolicyError("Invalid approval token")
+            deadline = min(deadline, expiry(status.get("approval_expires_at")))
+            # The original invocation is preserved. A token alone cannot
+            # release it: current server policy must allow this exact retry.
+            retry = {**body, "context": {**body["context"], "approval_token": token}}
+            final = request_json(endpoint, key, _EVALUATE, retry, deadline)
+            if decision(final, retry) != "allow":
+                raise PolicyError("Policy refused the approved invocation")
+            if time.monotonic() >= deadline:
+                raise PolicyError("Approval deadline elapsed before release")
+            return
+        if state != "pending":
+            raise PolicyError("Approval was denied, expired or invalid")
+        time.sleep(min(_POLL_SECONDS, max(0, deadline - time.monotonic())))
+    raise PolicyError("Approval deadline elapsed before release")
+
+
+def evaluate(event, env):
+    endpoint, key = env.get("ZENTINELLE_ENDPOINT", ""), credential(env)
+    required = env.get("ZENTINELLE_REQUIRED") == "1" or env.get("ZENTINELLE_HARNESS")
+    if not endpoint and not key and not required:
+        return
+    if not endpoint or not key:
+        raise PolicyError("Incomplete Zentinelle configuration")
+    endpoint = base_url(endpoint)
+    body = invocation(event, env)
+    result = request_json(endpoint, key, _EVALUATE, body)
+    selected = decision(result, body)
+    if selected == "ask" and env.get("ZENTINELLE_HARNESS"):
+        _hold(endpoint, key, body, result)
+    elif selected != "allow":
+        raise PolicyError("Blocked by Zentinelle policy")
 
 
 def main():
-    endpoint = os.environ.get("ZENTINELLE_ENDPOINT", "").rstrip("/")
-    api_key = os.environ.get("ZENTINELLE_KEY", "")
-    agent_id = os.environ.get("ZENTINELLE_AGENT_ID", "")
-    fail_open = os.environ.get("ZENTINELLE_FAIL_OPEN", "0") == "1"
-
-    if not endpoint or not api_key:
-        # Not configured — pass through silently
-        _allow()
-
-    # Read hook input from Claude Code
+    event = {}
     try:
-        hook_input = json.loads(sys.stdin.read())
-    except (json.JSONDecodeError, OSError):
-        hook_input = {}
-
-    tool_name = hook_input.get("tool_name", "unknown")
-    tool_input = hook_input.get("tool_input", {})
-
-    harness = os.environ.get("ZENTINELLE_HARNESS", "")
-    if harness:
-        # calliope-cli's policy.command sends {id, name, arguments}; same
-        # meaning, so one hook serves both harnesses.
-        if "tool_name" not in hook_input and "name" in hook_input:
-            hook_input = {"tool_name": hook_input.get("name"), "tool_input": hook_input.get("arguments", {}),
-                          "tool_use_id": hook_input.get("id"), "session_id": os.environ.get("ZENTINELLE_SESSION_ID")}
-        _agent_host(endpoint, api_key, harness, hook_input, fail_open)
-
-    # Call Zentinelle evaluate endpoint
-    payload = json.dumps({
-        "agent_id": agent_id,
-        "action": "tool_call",
-        "context": {
-            "tool": tool_name,
-            "tool_input": tool_input,
-            "source": "claude_code_hook",
-        },
-    }).encode()
-
-    req = urllib.request.Request(
-        f"{endpoint}/api/zentinelle/v1/evaluate",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "X-Zentinelle-Key": api_key,
-        },
-        method="POST",
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-            result = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")
-        if fail_open:
-            _allow()
-        _block(f"Zentinelle policy check failed (HTTP {e.code}): {body[:200]}")
-    except (urllib.error.URLError, OSError, TimeoutError):
-        if fail_open:
-            _allow()
-        _block(
-            "Cannot reach Zentinelle policy server. "
-            "Set ZENTINELLE_FAIL_OPEN=1 to allow tool calls when Zentinelle is offline."
-        )
-    except json.JSONDecodeError:
-        if fail_open:
-            _allow()
-        _block("Invalid response from Zentinelle policy server.")
-
-    if not result.get("allowed", True):
-        reason = result.get("reason") or "Blocked by Zentinelle policy"
-        policies = result.get("policies_evaluated", [])
-        if policies:
-            reason += f" (policies: {', '.join(policies)})"
-        _block(reason)
-
-    _allow()
-
-
-def _post(endpoint, api_key, path, body):
-    req = urllib.request.Request(
-        f"{endpoint}{path}",
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "X-Zentinelle-Key": api_key},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-        return json.loads(resp.read())
-
-
-def _get(endpoint, api_key, path):
-    req = urllib.request.Request(f"{endpoint}{path}", headers={"X-Zentinelle-Key": api_key})
-    with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
-        return json.loads(resp.read())
-
-
-def _agent_host(endpoint, api_key, harness, hook_input, fail_open):
-    """The agent host contract (zentinelle#377): allow, deny, or hold on ask.
-
-    Every exit path ends the process: allow exits 0, anything else blocks.
-    """
-    body = {
-        "action": "tool_call",
-        "context": {
-            "harness": harness,
-            "session_id": hook_input.get("session_id") or "unknown",
-            "tool_name": hook_input.get("tool_name", "unknown"),
-            "tool_input": hook_input.get("tool_input", {}),
-        },
-    }
-    if hook_input.get("tool_use_id"):
-        body["context"]["tool_call_id"] = hook_input["tool_use_id"]
-    user_id = os.environ.get("ZENTINELLE_USER_ID", "")
-    if user_id:
-        body["user_id"] = user_id
-
-    try:
-        result = _post(endpoint, api_key, "/api/zentinelle/v1/evaluate", body)
-        decision = result.get("decision")
-        if decision == "ask":
-            approval = result.get("approval") or {}
-            request_id = approval.get("request_id")
-            timeout = min(int(approval.get("timeout_seconds") or 300), 300)
-            if not request_id:
-                _block(result.get("reason") or "Approval required")
-            deadline = time.monotonic() + timeout
-            while True:
-                status = _get(endpoint, api_key, f"/api/zentinelle/v1/approvals/requests/{request_id}")
-                if status.get("status") == "approved":
-                    body["context"]["approval_token"] = status["approval_token"]
-                    result = _post(endpoint, api_key, "/api/zentinelle/v1/evaluate", body)
-                    decision = result.get("decision")
-                    break
-                if status.get("status") != "pending":
-                    _block(status.get("reason") or f"Approval {status.get('status')}")
-                if time.monotonic() >= deadline:
-                    _block("No approval arrived in time")
-                time.sleep(_POLL_SECONDS)
-    except urllib.error.HTTPError as e:
-        if fail_open:
-            _allow()
-        _block(f"Zentinelle policy check failed (HTTP {e.code}): {e.read().decode(errors='replace')[:200]}")
-    except (urllib.error.URLError, OSError, TimeoutError, ValueError, KeyError):
-        if fail_open:
-            _allow()
-        _block("Cannot reach Zentinelle policy server.")
-
-    if decision == "allow":
-        _allow()
-    _block(result.get("reason") or "Blocked by Zentinelle policy")
+        env = dict(os.environ)
+        required = env.get("ZENTINELLE_REQUIRED") == "1" or env.get("ZENTINELLE_HARNESS")
+        if not env.get("ZENTINELLE_ENDPOINT") and not credential(env) and not required:
+            return 0
+        event = read_event(sys.stdin.buffer)
+        evaluate(event, env)
+        return 0
+    except Exception as error:
+        reason = str(error) if isinstance(error, PolicyError) else "Invalid policy check; tool refused"
+        if isinstance(event, dict) and event.get("hook_event_name") == "BeforeTool":
+            output = {"decision": "deny", "reason": reason}
+        else:
+            output = {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                           "permissionDecisionReason": reason}}
+        print(json.dumps(output))
+        print(reason, file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

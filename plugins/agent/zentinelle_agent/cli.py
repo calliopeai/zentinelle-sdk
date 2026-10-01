@@ -2,36 +2,25 @@
 zentinelle-agent CLI
 
 Commands:
-  install        Write Zentinelle hooks to .claude/settings.json
+  install        Install runtime-configured Claude Code hooks
+  install-gemini Install runtime-configured Gemini CLI hooks
   uninstall      Remove Zentinelle hooks from .claude/settings.json
   proxy          Start local header-injecting proxy server
   status         Show current installation state
   install-skill  Install /zentinelle slash command into Claude Code
 
-Usage:
-  zentinelle-agent install \\
-    --endpoint http://localhost:8000 \\
-    --key sk_agent_... \\
-    --agent-id my-agent
-
-  zentinelle-agent proxy \\
-    --endpoint http://localhost:8000 \\
-    --key sk_agent_... \\
-    --provider openai
-
-  zentinelle-agent install-skill
-
-  ZENTINELLE_ENDPOINT=http://localhost:8000 \\
-  ZENTINELLE_KEY=sk_agent_... \\
+Usage (runtime endpoint and key supplied through the environment):
   zentinelle-agent install
+  zentinelle-agent install-gemini
+  zentinelle-agent proxy --provider openai
+  zentinelle-agent status
+  zentinelle-agent install-skill
 """
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
-from pathlib import Path
 
 
 def _require(name: str, value: str | None, env_var: str) -> str:
@@ -63,10 +52,10 @@ def cmd_install(args):
 
     print(f"Zentinelle hooks installed: {settings_path}")
     print()
-    print(f"  Endpoint : {endpoint}")
-    print(f"  Agent ID : {agent_id}")
     print(f"  Mode     : {args.mode}")
-    print(f"  Fail open: {args.fail_open}")
+    print("  Configuration: inherited from the harness runtime environment")
+    print("  Set ZENTINELLE_ENDPOINT and ZENTINELLE_KEY before launching Claude Code.")
+    print("  Set ZENTINELLE_AGENT_ID and ZENTINELLE_USER_ID when required by your policies.")
     print()
     print("Restart Claude Code to activate hooks.")
 
@@ -89,11 +78,11 @@ def cmd_install_gemini(args):
 
     print(f"Zentinelle Gemini hooks installed: {settings_path}")
     print()
-    print(f"  Endpoint : {endpoint}")
-    print(f"  Agent ID : {agent_id}")
-    print(f"  Fail open: {args.fail_open}")
+    print("  Configuration: inherited from the harness runtime environment")
+    print("  Set ZENTINELLE_ENDPOINT and ZENTINELLE_KEY before launching Gemini CLI.")
+    print("  Set ZENTINELLE_AGENT_ID and ZENTINELLE_USER_ID when required by your policies.")
     print()
-    print("Gemini CLI hooks are active for this project.")
+    print("Restart Gemini CLI to load the installed project hooks.")
 
 
 def cmd_uninstall(args):
@@ -130,44 +119,23 @@ def cmd_proxy(args):
 
 
 def cmd_status(args):
+    from zentinelle_agent.hooks.settings import installed_hooks
+
     project_dir = args.project_dir or os.getcwd()
-    settings_path = Path(project_dir) / ".claude" / "settings.json"
-
-    if not settings_path.exists():
-        print("No .claude/settings.json found.")
-        return
-
-    try:
-        settings = json.loads(settings_path.read_text())
-    except json.JSONDecodeError:
-        print(f"Cannot parse {settings_path}")
-        return
-
-    hooks = settings.get("hooks", {})
-    zentinelle_hooks = {}
-
-    for event in ("PreToolUse", "PostToolUse"):
-        event_hooks = hooks.get(event, [])
-        znt = [h for h in event_hooks if "zentinelle" in json.dumps(h).lower()]
-        if znt:
-            zentinelle_hooks[event] = znt
-
-    if not zentinelle_hooks:
-        print("Zentinelle hooks: not installed")
-        return
-
-    print(f"Zentinelle hooks installed in: {settings_path}")
-    for event, event_hooks in zentinelle_hooks.items():
-        for hook in event_hooks:
-            for h in hook.get("hooks", []):
-                cmd = h.get("command", "")
-                # Extract endpoint from command for display
-                import re
-                m = re.search(r"ZENTINELLE_ENDPOINT='?([^' ]+)'?", cmd)
-                endpoint = m.group(1) if m else "(unknown)"
-                m2 = re.search(r"ZENTINELLE_AGENT_ID='?([^' ]+)'?", cmd)
-                agent_id = m2.group(1) if m2 else "(unknown)"
-                print(f"  {event}: endpoint={endpoint} agent_id={agent_id}")
+    configurations = (
+        ("Claude Code", ".claude", {"PreToolUse": "pre_tool", "PostToolUse": "post_tool"}),
+        ("Gemini CLI", ".gemini", {"BeforeTool": "pre_tool", "AfterTool": "post_tool"}),
+    )
+    for label, directory, events in configurations:
+        path, found = installed_hooks(project_dir, directory, events)
+        if not found:
+            print(f"{label}: Zentinelle hooks not installed")
+            continue
+        print(f"{label}: Zentinelle hooks installed in {path}")
+        for event, current in found:
+            detail = "runtime environment" if current else "legacy command; reinstall to migrate"
+            print(f"  {event}: {detail}")
+    print("Status reports installed settings; it does not verify that a running harness loaded its hooks.")
 
 
 def cmd_install_skill(args):
@@ -213,12 +181,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     # install
     p_install = sub.add_parser("install", help="Install Zentinelle hooks into .claude/settings.json")
-    p_install.add_argument("--endpoint", help="Zentinelle base URL (or ZENTINELLE_ENDPOINT)")
-    p_install.add_argument("--key", help="Zentinelle agent API key (or ZENTINELLE_KEY)")
-    p_install.add_argument("--agent-id", dest="agent_id", help="Agent identifier (default: claude-code)")
+    p_install.add_argument("--endpoint", help="Install-time validation only; runtime uses ZENTINELLE_ENDPOINT")
+    p_install.add_argument("--key", help="Install-time validation only; runtime uses ZENTINELLE_KEY")
+    p_install.add_argument("--agent-id", dest="agent_id", help="Install-time label; runtime uses ZENTINELLE_AGENT_ID")
     p_install.add_argument("--project-dir", dest="project_dir", help="Project root (default: cwd)")
     p_install.add_argument("--fail-open", dest="fail_open", action="store_true",
-                           help="Allow tool calls when Zentinelle is unreachable")
+                           help="Deprecated; rejected because blocking hooks require an explicit allow")
     p_install.add_argument("--mode", choices=("both", "pre", "post"), default="both",
                            help="Which hooks to install (default: both)")
     p_install.set_defaults(func=cmd_install)
@@ -230,12 +198,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     # install-gemini
     p_install_gemini = sub.add_parser("install-gemini", help="Install Zentinelle hooks into .gemini/settings.json")
-    p_install_gemini.add_argument("--endpoint", help="Zentinelle base URL (or ZENTINELLE_ENDPOINT)")
-    p_install_gemini.add_argument("--key", help="Zentinelle agent API key (or ZENTINELLE_KEY)")
-    p_install_gemini.add_argument("--agent-id", dest="agent_id", help="Agent identifier (default: gemini-cli)")
+    p_install_gemini.add_argument("--endpoint", help="Install-time validation only; runtime uses ZENTINELLE_ENDPOINT")
+    p_install_gemini.add_argument("--key", help="Install-time validation only; runtime uses ZENTINELLE_KEY")
+    p_install_gemini.add_argument("--agent-id", dest="agent_id",
+                                  help="Install-time label; runtime uses ZENTINELLE_AGENT_ID")
     p_install_gemini.add_argument("--project-dir", dest="project_dir", help="Project root (default: cwd)")
     p_install_gemini.add_argument("--fail-open", dest="fail_open", action="store_true",
-                                  help="Allow tool calls when Zentinelle is unreachable")
+                                  help="Deprecated; rejected because blocking hooks require an explicit allow")
     p_install_gemini.set_defaults(func=cmd_install_gemini)
 
     # uninstall-gemini
@@ -244,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_uninstall_gemini.set_defaults(func=cmd_uninstall_gemini)
 
     # proxy
-    p_proxy = sub.add_parser("proxy", help="Start local proxy (for full API-level enforcement)")
+    p_proxy = sub.add_parser("proxy", help="Start local proxy for routed provider requests")
     p_proxy.add_argument("--endpoint", help="Zentinelle base URL (or ZENTINELLE_ENDPOINT)")
     p_proxy.add_argument("--key", help="Zentinelle agent API key (or ZENTINELLE_KEY)")
     p_proxy.add_argument(
@@ -280,7 +249,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     parser = build_parser()
     args = parser.parse_args()
-    args.func(args)
+    try:
+        args.func(args)
+    except ValueError as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(1)
+    except OSError:
+        print("Error: installation settings or filesystem are unavailable", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
