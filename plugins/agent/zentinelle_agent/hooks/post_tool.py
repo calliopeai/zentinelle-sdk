@@ -19,6 +19,7 @@ _NATIVE_SOURCES = {
     "PostToolUse": "claude_code_hook",
     "AfterTool": "gemini_cli_hook",
     "tool.execute.after": "opencode_plugin",
+    "postToolUse": "copilot_cli_hook",
 }
 
 
@@ -33,19 +34,18 @@ def _emit_async(endpoint, key, payload):
         pass  # Audit delivery never grants authority or replays a finished tool.
 
 
-def main():
+def emit(event, env):
+    """Emit a normalized native result using the shared bounded audit transport."""
     try:
-        env = dict(os.environ)
         endpoint, key = env.get("ZENTINELLE_ENDPOINT"), credential(env)
         if not endpoint or not key:
             return 0
         endpoint = base_url(endpoint)
-        event = read_event(sys.stdin.buffer)
         if not isinstance(event, dict) or event.get("hook_event_name") not in _NATIVE_SOURCES:
             return 0
         details = {"tool": event.get("tool_name"), "inputs": event.get("tool_input"),
                    "outputs": event.get("tool_response"), "source": _NATIVE_SOURCES[event["hook_event_name"]]}
-        for name in ("session_id", "tool_use_id", "tool_call_id", "chat_id", "turn_id"):
+        for name in ("session_id", "tool_use_id", "tool_call_id", "chat_id", "turn_id", "timestamp"):
             if name in event:
                 details[name] = event[name]
         body = {"events": [{"type": "tool_call", "category": "audit", "payload": details,
@@ -62,6 +62,16 @@ def main():
     except Exception:
         pass
     return 0
+
+
+def main():
+    try:
+        env = dict(os.environ)
+        if not env.get("ZENTINELLE_ENDPOINT") or not credential(env):
+            return 0
+        return emit(read_event(sys.stdin.buffer), env)
+    except Exception:
+        return 0
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main, fix/38-harness-policy-hooks]
+    branches: [main, fix/38-harness-policy-hooks, feature/40-opencode-hooks]
 
 jobs:
   test-python:
@@ -176,8 +176,10 @@ jobs:
           # must use the wheel, including its adjacent transport and skill.
           package_tests="$(pwd)/tests/test_hook_settings.py"
           native_tests="$(pwd)/tests/test_pre_tool_agent_host.py"
+          copilot_tests="$(pwd)/tests/test_copilot_hooks.py"
           package_smoke_dir="$(mktemp -d)"
           trap 'rm -rf "$package_smoke_dir"' EXIT
           cd "$package_smoke_dir"
           python -m pytest "$package_tests" -q
           ZENTINELLE_TEST_INSTALLED_HOOKS=1 python -m pytest "$native_tests" -q
+          python -m pytest "$copilot_tests" -q
