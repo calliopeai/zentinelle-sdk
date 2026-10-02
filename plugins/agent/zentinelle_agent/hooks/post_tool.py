@@ -15,6 +15,11 @@ else:
     from transport import MAX_BYTES, NoRedirect, base_url, credential, read_event
 
 _TIMEOUT = 3
+_NATIVE_SOURCES = {
+    "PostToolUse": "claude_code_hook",
+    "AfterTool": "gemini_cli_hook",
+    "tool.execute.after": "opencode_plugin",
+}
 
 
 def _emit_async(endpoint, key, payload):
@@ -36,11 +41,10 @@ def main():
             return 0
         endpoint = base_url(endpoint)
         event = read_event(sys.stdin.buffer)
-        if not isinstance(event, dict) or event.get("hook_event_name") not in ("PostToolUse", "AfterTool"):
+        if not isinstance(event, dict) or event.get("hook_event_name") not in _NATIVE_SOURCES:
             return 0
         details = {"tool": event.get("tool_name"), "inputs": event.get("tool_input"),
-                   "outputs": event.get("tool_response"), "source": "gemini_cli_hook"
-                   if event["hook_event_name"] == "AfterTool" else "claude_code_hook"}
+                   "outputs": event.get("tool_response"), "source": _NATIVE_SOURCES[event["hook_event_name"]]}
         for name in ("session_id", "tool_use_id", "tool_call_id", "chat_id", "turn_id"):
             if name in event:
                 details[name] = event[name]
