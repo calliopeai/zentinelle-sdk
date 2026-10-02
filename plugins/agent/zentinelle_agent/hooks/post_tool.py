@@ -1,98 +1,64 @@
 #!/usr/bin/env python3
-"""
-Zentinelle PostToolUse hook for Claude Code.
+"""Best-effort bounded audit hook; never execution authorization."""
+from __future__ import annotations
 
-Claude Code calls this script after every tool invocation. This is a
-fire-and-forget audit emitter — it always exits 0, never blocks execution.
-
-Environment variables:
-  ZENTINELLE_ENDPOINT   Zentinelle base URL  (e.g. http://localhost:8000)
-  ZENTINELLE_KEY        Agent API key
-  ZENTINELLE_AGENT_ID   Agent identifier
-
-Claude Code passes hook input as JSON on stdin:
-  {
-    "tool_name": "Bash",
-    "tool_input": {"command": "ls"},
-    "tool_response": {"output": "file.txt\n", "interrupted": false}
-  }
-"""
 import json
 import os
 import sys
 import threading
-import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-_TIMEOUT = 3  # seconds
+if __package__:
+    from .transport import MAX_BYTES, NoRedirect, base_url, credential, read_event
+else:
+    from transport import MAX_BYTES, NoRedirect, base_url, credential, read_event
+
+_TIMEOUT = 3
 
 
-def _emit_async(endpoint: str, api_key: str, agent_id: str, payload: bytes) -> None:
-    """Send audit event in a background thread — PostToolUse must not block."""
-    req = urllib.request.Request(
-        f"{endpoint}/api/zentinelle/v1/events",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "X-Zentinelle-Key": api_key,
-        },
-        method="POST",
-    )
+def _emit_async(endpoint, key, payload):
+    request = urllib.request.Request(endpoint + "/api/zentinelle/v1/events", data=payload,
+                                     headers={"Content-Type": "application/json", "X-Zentinelle-Key": key},
+                                     method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=_TIMEOUT):
+        with urllib.request.build_opener(NoRedirect()).open(request, timeout=_TIMEOUT):
             pass
     except Exception:
-        pass  # Fire and forget — never fail the hook
+        pass  # Audit delivery never grants authority or replays a finished tool.
 
 
 def main():
-    endpoint = os.environ.get("ZENTINELLE_ENDPOINT", "").rstrip("/")
-    api_key = os.environ.get("ZENTINELLE_KEY", "")
-    agent_id = os.environ.get("ZENTINELLE_AGENT_ID", "")
-
-    if not endpoint or not api_key:
-        sys.exit(0)
-
     try:
-        hook_input = json.loads(sys.stdin.read())
-    except (json.JSONDecodeError, OSError):
-        hook_input = {}
-
-    tool_name = hook_input.get("tool_name", "unknown")
-    tool_input = hook_input.get("tool_input", {})
-    tool_response = hook_input.get("tool_response", {})
-
-    payload = json.dumps({
-        "agent_id": agent_id,
-        "events": [
-            {
-                "type": "tool_call",
-                "category": "audit",
-                "payload": {
-                    "tool": tool_name,
-                    "inputs": tool_input,
-                    "outputs": tool_response,
-                    "source": "claude_code_hook",
-                },
-                "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-                "user_id": "",
-            }
-        ],
-    }).encode()
-
-    # Emit in background — PostToolUse exit code is ignored by Claude Code
-    # but we still don't want to add latency
-    t = threading.Thread(
-        target=_emit_async,
-        args=(endpoint, api_key, agent_id, payload),
-        daemon=True,
-    )
-    t.start()
-    t.join(timeout=_TIMEOUT + 0.5)  # Wait briefly so daemon thread completes before process exits
-
-    sys.exit(0)
+        env = dict(os.environ)
+        endpoint, key = env.get("ZENTINELLE_ENDPOINT"), credential(env)
+        if not endpoint or not key:
+            return 0
+        endpoint = base_url(endpoint)
+        event = read_event(sys.stdin.buffer)
+        if not isinstance(event, dict) or event.get("hook_event_name") not in ("PostToolUse", "AfterTool"):
+            return 0
+        details = {"tool": event.get("tool_name"), "inputs": event.get("tool_input"),
+                   "outputs": event.get("tool_response"), "source": "gemini_cli_hook"
+                   if event["hook_event_name"] == "AfterTool" else "claude_code_hook"}
+        for name in ("session_id", "tool_use_id", "tool_call_id", "chat_id", "turn_id"):
+            if name in event:
+                details[name] = event[name]
+        body = {"events": [{"type": "tool_call", "category": "audit", "payload": details,
+                           "timestamp": datetime.now(timezone.utc).isoformat(),
+                           "user_id": env.get("ZENTINELLE_USER_ID", "")}]}
+        if env.get("ZENTINELLE_AGENT_ID"):
+            body["agent_id"] = env["ZENTINELLE_AGENT_ID"]
+        payload = json.dumps(body, allow_nan=False).encode()
+        if len(payload) > MAX_BYTES:
+            return 0
+        worker = threading.Thread(target=_emit_async, args=(endpoint, key, payload), daemon=True)
+        worker.start()
+        worker.join(timeout=_TIMEOUT + 0.5)
+    except Exception:
+        pass
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

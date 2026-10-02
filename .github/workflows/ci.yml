@@ -165,3 +165,17 @@ jobs:
           pip install pytest
           python -m pytest tests -q
           python -m zentinelle_agent.cli proxy --help
+
+      - name: Packaged hook and skill lifecycle
+        working-directory: plugins/agent
+        run: |
+          pip install build
+          python -m build --wheel --outdir dist
+          pip install --force-reinstall --no-deps dist/*.whl
+          # Run outside the source package so imports and installed commands
+          # must use the wheel, including its adjacent transport and skill.
+          package_tests="$(pwd)/tests/test_hook_settings.py"
+          package_smoke_dir="$(mktemp -d)"
+          trap 'rm -rf "$package_smoke_dir"' EXIT
+          cd "$package_smoke_dir"
+          python -m pytest "$package_tests" -q

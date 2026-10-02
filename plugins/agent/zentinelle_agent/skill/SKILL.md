@@ -1,92 +1,44 @@
 ---
 name: zentinelle
-description: Set up Zentinelle AI governance for this coding agent session — hooks (tool-level policy enforcement + audit) and/or proxy (full API-level enforcement).
+description: Install or inspect Zentinelle native policy hooks and audit for Claude Code or Gemini CLI, or configure the optional provider proxy. Use for setup, status, and uninstall requests.
 argument-hint: "[hooks|proxy|both|status|uninstall]"
 disable-model-invocation: true
 ---
 
-Set up Zentinelle governance for this coding agent session.
+Configure the requested integration using `zentinelle-agent`. Default mode is hooks.
+Check `zentinelle-agent --help`; install the released package with
+`pip install zentinelle-agent` if needed, honoring the user's environment choice.
 
-Mode: $ARGUMENTS (default: hooks)
+For hooks, determine whether the target is Claude Code or Gemini CLI and which
+project to configure. Check only whether `ZENTINELLE_ENDPOINT` and
+`ZENTINELLE_KEY` are present; never print key values, request credentials in chat,
+or place them in settings, commands, or committed files. If missing, have the user
+configure a scoped agent key through their environment or secret manager.
+Agent and user identity, when required by policy, also come from the environment
+of the process that launches the harness. Host credentials remain in a trusted
+host, not a third-party harness.
 
-## Steps
+| Request | Claude Code | Gemini CLI |
+|---|---|---|
+| Install or update hooks | `zentinelle-agent install` | `zentinelle-agent install-gemini` |
+| Inspect both harness settings | `zentinelle-agent status` | Same command |
+| Remove owned hooks | `zentinelle-agent uninstall` | `zentinelle-agent uninstall-gemini` |
 
-**1. Check installation**
+Use `--project-dir` for another existing project. Install preserves unrelated
+settings and refuses invalid settings; repair only changes the user authorizes.
+Runtime configuration is inherited, so install-time flags do not configure future
+harness sessions. Restart the target harness to load its hooks, then inspect
+status. State that status confirms settings, not hook activation or effect coverage.
+Do not enable fail-open: blocking hooks require an explicit valid service allow.
 
-Run this and check if it succeeds:
-```bash
-pip show zentinelle-agent
-```
+For requested proxy mode, use `zentinelle-agent proxy --provider` with `anthropic`,
+`openai`, or `google`, inheriting endpoint and key from the environment. Run the
+proxy in the user-selected persistent process environment, and configure the
+client's supported base URL to its loopback listener. Provider request governance
+does not authorize local tool effects. For `both`, configure native hooks and the
+proxy separately.
 
-If not installed:
-```bash
-pip install zentinelle-agent
-```
-
-**2. Collect configuration**
-
-Check the environment for existing config:
-```bash
-echo "ENDPOINT: ${ZENTINELLE_ENDPOINT:-not set}"
-echo "KEY: ${ZENTINELLE_KEY:-not set}"
-echo "AGENT_ID: ${ZENTINELLE_AGENT_ID:-not set}"
-```
-
-If any are missing, ask the user:
-- **Endpoint**: URL of their Zentinelle instance (e.g. `http://localhost:8080` for local, or their hosted URL)
-- **Key**: Agent API key (starts with `sk_agent_`)
-- **Agent ID**: A label for this session (e.g. `claude-code-dev`, `codex-dev`, `gemini-dev`)
-
-**3. Execute based on mode**
-
-**`hooks`** (default — installs PreToolUse/PostToolUse hooks, Claude Code and Gemini CLI supported):
-
-For Claude Code:
-```bash
-zentinelle-agent install \
-  --endpoint <endpoint> \
-  --key <key> \
-  --agent-id <agent-id>
-```
-
-For Gemini CLI:
-```bash
-zentinelle-agent install-gemini \
-  --endpoint <endpoint> \
-  --key <key> \
-  --agent-id <agent-id>
-```
-Tell the user: hooks are active after restarting the CLI.
-
-**`proxy`** (full API-level enforcement — works with any agent):
-Ask the user which provider they're using, then show these steps:
-
-Step A — start the proxy (run in a separate terminal):
-```bash
-zentinelle-agent proxy \
-  --endpoint <endpoint> \
-  --key <key> \
-  --provider <anthropic|openai|google>
-```
-
-Step B — point the agent at the proxy:
-- **Claude Code**: `export ANTHROPIC_BASE_URL=http://127.0.0.1:8742`
-- **Codex (OpenAI)**: `export OPENAI_BASE_URL=http://127.0.0.1:8742`
-- **Gemini**: Note that Gemini SDKs require programmatic configuration (see `README.md`). `export GOOGLE_API_BASE` is generally not supported natively.
-
-**`both`** — do hooks first, then show proxy instructions.
-
-**`status`** — show current installation state:
-```bash
-zentinelle-agent status
-```
-
-**`uninstall`** — remove hooks:
-```bash
-zentinelle-agent uninstall
-```
-
-**4. Confirm**
-
-After setup, run `zentinelle-agent status` and show the user what's active.
-Summarize in one sentence what enforcement is now in place.
+Report the installed path and the selected integration. Native harnesses own
+hook dispatch, so disabled or skipped hooks and hosted tools that bypass local
+dispatch are outside this coverage. Mandatory dispatch admission requires an
+owned host. Do not modify or fork third-party harness runtimes.
